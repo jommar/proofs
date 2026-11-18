@@ -2,22 +2,24 @@
 
 Check a finished change against its acceptance criteria (ACs), two ways:
 
-- **Local comparison:** run the same checks on a base revision (Before) and the change's worktree branch (After), each started locally. Or, after merge, on the merged branch only.
-- **Running environment:** run the checks against a URL you name (local, dev, UAT, or any live site) with `--url`. Nothing is started.
+- **A local checkout:** `--worktree <dir>` starts the app from that directory (the base or the feature branch) and runs the checks against it. Run it once per branch and compare the two reports. The older single-command Before/After comparison and post-merge mode also remain.
+- **A running environment:** `--url <origin>` runs the checks against a URL you name (local, dev, UAT, or any live site). Nothing is started.
 
 Use [Gherkin + Playwright](bdd/README.md) for what a user sees and [Bruno](api/README.md) for HTTP. No ticket tracker, database or container engine is required.
 
 ## Run a ticket
 
 ```bash
+node proofs/run.mjs TEAM-42 --worktree ~/work/app-feature --login APP_USER,APP_PASS   # one local checkout
+node proofs/run.mjs TEAM-42 --worktree ~/work/app-base    --login APP_USER,APP_PASS   # the base, to compare
 node proofs/run.mjs TEAM-42 --plan           # resolve pins, input digest and runtime; starts nothing
-node proofs/run.mjs TEAM-42                  # local comparison: Before and After
+node proofs/run.mjs TEAM-42                  # local comparison: Before and After from the manifest's pins
 node proofs/run.mjs TEAM-42 --post-merge     # after merge: merged branch only
 node proofs/run.mjs TEAM-42 --url https://dev.example.com --branch feature/x   # a running environment
 node proofs/run.mjs TEAM-42 --check          # start (or probe) only; run no ACs
 ```
 
-Run from the workspace root, or add `--workspace <path>`. The runtime is chosen in this order: `--runtime <path>`, `PROOFS_RUNTIME`, the workspace's `.proofs-runtime/runtime.mjs`, then the [built-in runtime](#built-in-runtime). The plan prints which one. Read `.proofs-out/TEAM-42/<run-id>/report.md`: one row per AC with a Before and an After column.
+Run from the workspace root (where your app repos are), or add `--workspace <path>`. The runtime is chosen in this order: `--runtime <path>`, `PROOFS_RUNTIME`, the workspace's `.proofs-runtime/runtime.mjs`, then the [built-in runtime](#built-in-runtime). The plan prints which one. Read `.proofs-out/TEAM-42/<run-id>/report.md`: one row per AC with a Before and an After column.
 
 | Result | Meaning |
 | --- | --- |
@@ -30,6 +32,14 @@ A Before pass is valid; don't manufacture a regression. The command exits nonzer
 **Is the environment broken, or did the AC fail?** `--check` starts each side (or, with `--url`, probes each origin) and prints `ready` or `NOT READY — <cause>` without running any AC. A startup failure in a run's report names the service, step and exit code, for example `app: setup command 2 failed (exited with code 3)`; command text and output are never shown. `--plan` already fails with a clear message when the built-in runtime is selected but the manifest has no `runtimeOptions.services`.
 
 `--only bdd` or `--only api` (repeatable) runs just those adapters; the other ACs report as uncovered. Use it to keep a read-only run away from checks that write.
+
+## Test a local checkout
+
+`--worktree [app=]<dir>` tests one checkout. The directory must be a Git checkout root; its committed `HEAD` is exported and started with the manifest's `runtimeOptions.services` recipe (see [Built-in runtime](#built-in-runtime)). The report states the commit and whether the checkout was clean; uncommitted changes are not tested. Name the app (`TravelTracker=<dir>`) when the manifest has more than one, or leave it off when there is one.
+
+`--login <userVar>,<passVar>` names the two environment variables that hold the username and password (never the values). It overrides the manifest's `login` and works with both `--worktree` and `--url`.
+
+To compare a change with its base, run the same ticket twice, once on each directory, and read the two reports. The checks don't change between runs.
 
 ## Test a running environment
 
@@ -54,14 +64,14 @@ node proofs/run.mjs TEAM-42 --url web=https://dev.example.com --url api=https://
 ## Write a ticket's proofs
 
 ```text
-.proofs/TEAM-42/
+proofs/.proofs/TEAM-42/       # inside this repo, gitignored
   manifest.json
   bdd/        # optional: features/ and steps/
   api/        # optional: proof.json and .bru files
   fixtures/   # optional: approved synthetic CSVs
 ```
 
-Add `/.proofs/`, `/.proofs-out/` and `/.proofs-runtime/` to the workspace `.gitignore`. Give each AC a stable ID and write it from the issue or agreed spec, not from the diff or the author's results.
+A ticket's folder lives in this repo's own `.proofs/` (ignored by Git; reports go to `.proofs-out/` beside it, and a private runtime to `.proofs-runtime/`). A workspace-level `.proofs/TEAM-42/` is also accepted, and the harness checkout's copy wins if both exist. Add `/.proofs/`, `/.proofs-out/` and `/.proofs-runtime/` to any workspace `.gitignore` that holds them. Give each AC a stable ID and write it from the issue or agreed spec, not from the diff or the author's results.
 
 ```json
 {

@@ -105,6 +105,7 @@ test('rejects malformed options and unknown apps before starting anything', asyn
   await assert.rejects(start({ services: { app: { start: 'x', link: ['../etc'] } } }), /relative/);
   await assert.rejects(start({ services: { app: { start: 'x' } }, passEnv: ['bad-name'] }), /variable name/);
   await assert.rejects(start({ services: { other: { start: 'x' } } }), /no app "other"/);
+  await assert.rejects(start({ services: { app: { start: 'x' } }, login: { usernameEnv: 'ONLY_USER' } }), /login needs/);
   assert.equal(existsSync(join(root, 'v', 'src')), false);
 });
 

@@ -842,3 +842,113 @@ test('manifest login names env variables; the workspace .env fills gaps and the 
   await save();
   await assert.rejects(go({}), /names of environment variables, never their values/);
 });
+
+test('--worktree tests one checkout\'s committed HEAD, reports clean or dirty, and ignores manifest pins', async t => {
+  const { root, manifest, save } = await workspace(t);
+  const { worktree, sha } = await changed(root, manifest);
+  delete manifest.apps;
+  await save();
+  const plan = args => run([ticket, '--runtime', 'runtime.mjs', '--plan', ...args], { workspace: root, parentEnv: {} });
+
+  const clean = await plan(['--worktree', 'web_ui=candidate']);
+  assert.match(clean.plan, /Mode: single checkout/);
+  assert.match(clean.plan, new RegExp(`- \`web_ui\`: \`${sha}\` \\(clean checkout\\)`));
+  assert.match(clean.plan, /one sandbox for the checkout/);
+
+  await writeFile(join(worktree, 'tracked.txt'), 'a');
+  git(worktree, 'add', 'tracked.txt');
+  git(worktree, '-c', 'user.name=Proof Test', '-c', 'user.email=proof@example.invalid', 'commit', '-qm', 'tracked');
+  await writeFile(join(worktree, 'tracked.txt'), 'edited');
+  const dirty = await plan(['--worktree', 'web_ui=candidate']);
+  assert.match(dirty.plan, /`web_ui`: `[0-9a-f]{40}` \(checkout has uncommitted changes that were not tested\)/);
+  assert.ok(!dirty.plan.includes(sha), 'the pin is the checkout\'s current HEAD');
+
+  // The base is just another directory: the primary checkout works the same way.
+  assert.match((await plan(['--worktree', `web_ui=${join(root, 'web_ui')}`])).plan, /`web_ui`: `[0-9a-f]{40}` \(clean checkout\)/);
+
+  await assert.rejects(plan(['--worktree', 'candidate']), /Name the app/);
+  await assert.rejects(plan(['--worktree', 'web_ui=candidate', '--worktree', 'web_ui=web_ui']), /one --worktree/);
+  await assert.rejects(plan(['--worktree', 'web_ui=missing']), /worktree must be an existing directory/);
+  await mkdir(join(root, 'plain'));
+  await assert.rejects(plan(['--worktree', 'web_ui=plain']), /not a Git checkout root/);
+  await assert.rejects(plan(['--worktree', 'web_ui=candidate', '--post-merge']), /do not combine/);
+  await assert.rejects(run([ticket, '--plan', '--worktree', 'web_ui=candidate', '--url', 'https://x.test'], { workspace: root, parentEnv: {} }), /either --url or --worktree/);
+});
+
+test('--worktree names the app on its own when the manifest has one service, and runs a single After side', async t => {
+  const { root, manifest, save } = await workspace(t);
+  const { sha } = await changed(root, manifest);
+  manifest.runtimeOptions = { services: { app: { app: 'web_ui', start: 'node server.js' } } };
+  await save();
+  await adapter(root);
+  const starts = [];
+  const outcome = await run([ticket, '--worktree', 'candidate'], {
+    workspace: root, parentEnv: { PATH: process.env.PATH },
+    startSandbox: async input => { starts.push(input); return { env: { PROOF_APP_URL: 'http://127.0.0.1:3999' }, close: async () => {} }; },
+    invoke: async ({ env }) => { await writeResults(env.PROOF_RESULTS, [result()]); return 0; },
+  });
+  assert.equal(outcome.exitCode, 0);
+  assert.equal(starts.length, 1, 'one sandbox only');
+  assert.match(starts[0].id, /-after$/);
+  assert.equal(starts[0].commits.web_ui.sha, sha);
+  assert.equal(starts[0].commits.web_ui.repo, join(root, 'candidate'));
+  const report = await readFile(outcome.reportPath, 'utf8');
+  assert.match(report, /Mode: single checkout/);
+  assert.match(report, /Not run — single checkout \| Pass — bdd: pass/);
+});
+
+test('--login names two env variables, overrides the manifest, and rejects values', async t => {
+  const { root, manifest, save } = await workspace(t);
+  manifest.login = { usernameEnv: 'MANIFEST_USER', passwordEnv: 'MANIFEST_PASS' };
+  await save();
+  await adapter(root);
+  const seen = [];
+  const invoke = async ({ env }) => { seen.push(env); await writeResults(env.PROOF_RESULTS, [result()]); return 0; };
+  const parentEnv = { PATH: process.env.PATH, MANIFEST_USER: 'm-user', MANIFEST_PASS: 'm-pass', FLAG_USER: 'f-user', FLAG_PASS: 'f-pass' };
+  await run([ticket, '--url', 'https://trips.example.test'], { workspace: root, parentEnv, invoke });
+  assert.deepEqual([seen[0].PROOF_USERNAME, seen[0].PROOF_PASSWORD], ['m-user', 'm-pass']);
+  await run([ticket, '--url', 'https://trips.example.test', '--login', 'FLAG_USER,FLAG_PASS'], { workspace: root, parentEnv, invoke });
+  assert.deepEqual([seen[1].PROOF_USERNAME, seen[1].PROOF_PASSWORD], ['f-user', 'f-pass'], 'the flag wins over the manifest');
+  manifest.login = { usernameEnv: 'MANIFEST_USER' };
+  await save();
+  await assert.rejects(run([ticket, '--url', 'https://x.test', '--plan'], { workspace: root, parentEnv }), /names of environment variables/, 'a manifest login missing passwordEnv');
+  for (const bad of ['onlyone', 'a,b,c', 'has space,B', 'real-password-value,B']) {
+    await assert.rejects(run([ticket, '--url', 'https://x.test', '--login', bad, '--plan'], { workspace: root, parentEnv }), /environment variable names/, bad);
+  }
+});
+
+test('a ticket in the harness\'s own .proofs/ is found first, and its report goes to the harness\'s .proofs-out/', async t => {
+  const harness = fileURLToPath(new URL('..', import.meta.url));
+  const id = `HLOCAL-${process.pid}`;
+  const inputs = join(harness, '.proofs', id);
+  const outputs = join(harness, '.proofs-out', id);
+  t.after(() => Promise.all([rm(inputs, { recursive: true, force: true }), rm(outputs, { recursive: true, force: true })]));
+  await mkdir(join(inputs, 'api'), { recursive: true });
+  await writeFile(join(inputs, 'manifest.json'), JSON.stringify({ acs: [{ id: 'AC1', claim: 'harness-local claim' }] }));
+
+  // A workspace with no .proofs/ of its own: only the harness copy can satisfy the lookup.
+  const empty = await mkdtemp(join(tmpdir(), 'proof-empty-ws-'));
+  t.after(() => rm(empty, { recursive: true, force: true }));
+  const outcome = await run([id, '--url', 'https://trips.example.test'], {
+    workspace: empty, parentEnv: { PATH: process.env.PATH },
+    invoke: async ({ env }) => { await writeResults(env.PROOF_RESULTS, [result()]); return 0; },
+  });
+  assert.equal(outcome.exitCode, 0);
+  assert.ok(outcome.reportPath.startsWith(join(harness, '.proofs-out', id)), 'the report sits beside the harness inputs');
+  assert.deepEqual(await readdir(empty), [], 'nothing is written into the workspace');
+
+  // When the workspace has the same ticket too, the harness copy wins.
+  const both = await mkdtemp(join(tmpdir(), 'proof-both-ws-'));
+  t.after(() => rm(both, { recursive: true, force: true }));
+  await mkdir(join(both, '.proofs', id, 'api'), { recursive: true });
+  await writeFile(join(both, '.proofs', id, 'manifest.json'), JSON.stringify({ acs: [{ id: 'AC1', claim: 'workspace claim' }] }));
+  const preferred = await run([id, '--url', 'https://trips.example.test'], {
+    workspace: both, parentEnv: { PATH: process.env.PATH },
+    invoke: async ({ env }) => { await writeResults(env.PROOF_RESULTS, [result()]); return 0; },
+  });
+  const report = await readFile(preferred.reportPath, 'utf8');
+  assert.match(report, /harness-local claim/);
+  assert.doesNotMatch(report, /workspace claim/);
+  await rm(inputs, { recursive: true, force: true });
+  await assert.rejects(run([id, '--url', 'https://trips.example.test', '--plan'], { workspace: empty, parentEnv: {} }), /input directory must be an existing directory/);
+});

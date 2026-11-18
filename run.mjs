@@ -289,7 +289,7 @@ export async function run(args, {
   if (input.plan) return { exitCode: 0, plan: formatPlan(input, adapterTimeoutMs) };
 
   const id = randomUUID();
-  const out = await privateDir(join(input.workspace, '.proofs-out'), true);
+  const out = await privateDir(join(input.proofsRoot, '.proofs-out'), true);
   const ticketOut = await privateDir(join(out, input.ticket), true);
   const runDir = await privateDir(join(ticketOut, id));
   const scratch = await privateDir(join(runDir, '.private'));

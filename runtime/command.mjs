@@ -10,6 +10,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 const NAME = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const envName = value => typeof value === 'string' && ENV_NAME.test(value);
 const STEP_TIMEOUT_MS = 10 * 60_000;
 const READY_TIMEOUT_MS = 2 * 60_000;
 const GIT_ENV = {
@@ -42,7 +43,7 @@ function parseOptions(options) {
   }
   for (const key of list(passEnv, 'passEnv')) if (!ENV_NAME.test(key)) fail(`passEnv entry "${key}" is not a variable name.`);
   list(teardown, 'teardown');
-  if (login !== undefined && !(ENV_NAME.test(login?.usernameEnv) && ENV_NAME.test(login?.passwordEnv))) {
+  if (login !== undefined && !(envName(login?.usernameEnv) && envName(login?.passwordEnv))) {
     fail('login needs usernameEnv and passwordEnv variable names.');
   }
   return { services, passEnv: passEnv ?? [], teardown: teardown ?? [], login, context };
