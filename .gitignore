@@ -1,6 +1,5 @@
 # Private inputs, reports, installed dependencies, and local env files.
-/.proofs/*
-!/.proofs/.gitkeep
+/.proofs/
 /.proofs-out/
 /.proofs-runtime/
 node_modules/

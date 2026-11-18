@@ -102,5 +102,5 @@ For [post-merge verification](../README.md#verify-after-merge), append `--post-m
 ## Adapter verification
 
 - To invoke only the adapter against a fake service, run `node "$HARNESS/api/run.mjs" <absolute-api-input-dir>` with the URL variable(s) it references. Use a private `PROOF_RUN_DIR` for each invocation and set `PROOF_RESULTS` to an absolute NDJSON path inside it.
-- The adapter connects directly to the configured loopback address without DNS or proxies. For direct runs that use a private HTTPS certificate, set `NODE_EXTRA_CA_CERTS` to the CA file before starting Node. TLS verification stays enabled.
+- In a local comparison the adapter connects directly to the configured loopback address without DNS or proxies. With `--url` it resolves the host normally and reaches only the origins you named. For direct runs that use a private HTTPS certificate, set `NODE_EXTRA_CA_CERTS` to the CA file before starting Node. TLS verification stays enabled.
 - Run `npm --prefix api test` from the harness root to verify the adapter against fake loopback services. The HTTPS test uses `openssl` to generate a disposable certificate.

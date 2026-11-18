@@ -1,35 +1,61 @@
 # Proofs
 
-Verify a completed change against observable acceptance criteria (ACs). Before merge, run the same checks against two pinned Git revisions. After merge, repeat those checks against the merged local revision only. Use [Gherkin and Playwright](bdd/README.md) for user-visible behavior and [Bruno](api/README.md) for HTTP behavior. Neither a ticket tracker nor a particular database, container engine, or deployment stack is required by the harness.
+Check a finished change against its acceptance criteria (ACs), two ways:
 
-## Try the example
+- **Local comparison:** run the same checks on a base revision (Before) and the change's worktree branch (After), each started locally. Or, after merge, on the merged branch only.
+- **Running environment:** run the checks against a URL you name (local, dev, UAT, or any live site) with `--url`. Nothing is started.
 
-On Linux with Node.js 22+ and Git, clone this repository and run from its root:
+Use [Gherkin + Playwright](bdd/README.md) for what a user sees and [Bruno](api/README.md) for HTTP. No ticket tracker, database or container engine is required.
+
+## Run a ticket
 
 ```bash
-npm --prefix api ci
-npm --prefix bdd ci
-npm --prefix bdd exec -- playwright install chromium
-node examples/demo.mjs
+node proofs/run.mjs TEAM-42 --plan           # resolve pins, input digest and runtime; starts nothing
+node proofs/run.mjs TEAM-42                  # local comparison: Before and After
+node proofs/run.mjs TEAM-42 --post-merge     # after merge: merged branch only
+node proofs/run.mjs TEAM-42 --url https://dev.example.com --branch feature/x   # a running environment
 ```
 
-Install Chromium's operating-system dependencies if Playwright asks. The demo creates two commits of a tiny local HTTP app, runs real browser and API checks, and verifies both report modes. It needs no Docker, database, remote app, or login. You only need to install the test surface your own project uses.
+Run from the workspace root, or add `--workspace <path>`. The runtime is chosen in this order: `--runtime <path>`, `PROOFS_RUNTIME`, the workspace's `.proofs-runtime/runtime.mjs`, then the [built-in runtime](#built-in-runtime). The plan prints which one. Read `.proofs-out/TEAM-42/<run-id>/report.md`: one row per AC with a Before and an After column.
 
-## Set up a project
+| Result | Meaning |
+| --- | --- |
+| Pass | The check exercised the claimed behavior and it held. |
+| Fail | The check exercised the claimed behavior and contradicted it. |
+| Blocked | A fixture, login, response or evidence was missing. This is not a product failure. |
 
-The harness can live anywhere. In your project's chosen proof workspace, create:
+A Before pass is valid; don't manufacture a regression. The command exits nonzero for any blocker or a nonpassing After.
+
+## Test a running environment
+
+Pass `--url` and the harness starts nothing, pins nothing and needs no runtime or Docker. It runs the ticket's checks against the origins you give and reports one result per AC.
+
+```bash
+node proofs/run.mjs TEAM-42 --url https://dev.example.com
+node proofs/run.mjs TEAM-42 --url web=https://dev.example.com --url api=https://api.dev.example.com \
+  --context tenant=acme --branch feature/x
+```
+
+- `--url [name=]<origin>` is repeatable. An origin is `http(s)://host[:port]`, with no path, query or credentials. A bare origin is named `app` and reaches the checks as `PROOF_APP_URL`; `web=...` becomes `PROOF_WEB_URL`. Checks reference these names, so a ticket's checks work against any environment.
+- `--context key=value` becomes `PROOF_CONTEXT_<KEY>` (for example a tenant or client slug).
+- `--branch <name>` is a label printed in the report for the branch the environment is expected to serve. It is not verified; the harness cannot see what a remote environment deployed.
+- **Logins** come from your shell, never from a flag or manifest: set `PROOF_USERNAME` and `PROOF_PASSWORD` (browser checks) and, for API folders with `"auth": "runtime"`, `PROOF_API_HEADERS` (a JSON map from URL name to `authorization` or `cookie` headers).
+- TLS is verified. For a private CA set `NODE_EXTRA_CA_CERTS=<absolute path>`. `--insecure-tls` skips certificate checks (for example a local mkcert setup); use it only on environments you control.
+- The manifest needs only `acs`. `apps` is ignored.
+- The adapters can reach only the origins you listed. **Checks that create or change data change that environment**, so write checks that are safe for where you point them, and never aim a write check at production.
+- The report has no Before column (`Not run — target verification`) and says no revision was pinned: it describes what the environment served during the run.
+
+## Write a ticket's proofs
 
 ```text
 .proofs/TEAM-42/
   manifest.json
-  bdd/                  # optional: features/ and steps/
-  api/                  # optional: proof.json and .bru files
-  fixtures/             # optional: approved synthetic CSVs
+  bdd/        # optional: features/ and steps/
+  api/        # optional: proof.json and .bru files
+  fixtures/   # optional: approved synthetic CSVs
 ```
 
-Add `/.proofs/`, `/.proofs-out/`, and `/.proofs-runtime/` to the workspace Git ignore rules before adding inputs. Put a private runtime in `.proofs-runtime/`, or keep it in a separate access-controlled repository. This repository tracks only shared tooling and the synthetic example. For a different machine, hand off the same proof inputs privately; do not transfer credentials, customer data, or raw run artifacts.
-
-Start from the issue or agreed spec. Give each criterion a stable ID such as `AC1` and describe what you can observe. Do not copy previous reports, infer expectations from a code diff, or reuse the implementation author's result as your own evidence. Example `manifest.json`:
+Add `/.proofs/`, `/.proofs-out/` and `/.proofs-runtime/` to the workspace `.gitignore`. Give each AC a stable ID and write it from the issue or agreed spec, not from the diff or the author's results.
 
 ```json
 {
@@ -37,7 +63,7 @@ Start from the issue or agreed spec. Give each criterion a stable ID such as `AC
   "apps": {
     "catalog": {
       "repo": "catalog",
-      "before": "<approved baseline commit>",
+      "before": "<baseline commit>",
       "after": "<candidate commit>",
       "mergedRef": "refs/heads/main"
     }
@@ -46,47 +72,86 @@ Start from the issue or agreed spec. Give each criterion a stable ID such as `AC
 }
 ```
 
-- List every repository that contributes to the stack being tested; one is enough. Paths are relative to the workspace unless absolute. Pin unchanged dependencies to the same commit on both sides. Prefer full SHAs so a branch moving does not silently change the comparison.
-- Optionally give a candidate `worktree` for an app. It must belong to that repo, be clean, and match the candidate pin when one is supplied. Use application checkouts as read-only inputs. Do not install dependencies, switch branches, stash, or reset them for a proof.
-- `mergedRef` is an exact local `refs/heads/...` ref for that app. The runner does not fetch or decide whether a squash, rebase, or cherry-pick contains the intended change; check that before running post-merge.
-- Omit `csv` if not needed. List regular CSV files inside the proof directory with distinct basenames. Copies are staged read-only. Never put credentials or customer data in a manifest, check, or CSV.
-- `runtimeOptions` is an optional JSON object consumed by your runtime module. Use it for non-secret project settings, not for executable instructions or credentials.
+- **Apps** (local comparison only; ignored with `--url`): list every repository in the stack, even unchanged ones (pin them to the same commit on both sides). Use full SHAs. Paths are relative to the workspace unless absolute.
+- **Worktree (optional):** a clean linked worktree of that repo whose HEAD matches `after`. Never install, switch branches, stash or reset an application checkout for a proof.
+- **`mergedRef`:** an exact local `refs/heads/...` branch, used by `--post-merge`. The runner does not fetch or check that a squash or rebase contains the change.
+- **`csv`:** optional regular CSV files inside the ticket directory with distinct names. Staged read-only.
+- **`runtimeOptions`:** non-secret settings for the runtime. The built-in runtime reads its services from here.
+- Never put credentials or customer data in a manifest, check or CSV.
 
-## Supply a local runtime
+## Built-in runtime
 
-An operator selects a trusted local ESM module explicitly with `--runtime`. A proof manifest does not choose executable code. See the [demo runtime](examples/) for a working example. The module exports:
+For most projects nothing needs writing: list the services in the manifest and the harness starts each one from its pinned commit as a local process. Example (`examples/built-in-demo.mjs` runs this end to end):
+
+```json
+"runtimeOptions": {
+  "services": {
+    "app": {
+      "app": "catalog",
+      "setup": ["npm ci"],
+      "start": "node server.js",
+      "ready": "/health"
+    }
+  },
+  "passEnv": ["DB_PASSWORD"],
+  "login": { "usernameEnv": "PROOF_LOGIN_USER", "passwordEnv": "PROOF_LOGIN_PASS" },
+  "context": { "tenant": "demo" },
+  "teardown": []
+}
+```
+
+Per side, for each service in order, it:
+
+1. exports the pinned commit with `git archive` into the side's directory (committed files only);
+2. symlinks each `link` path (for example `node_modules`) from the repository checkout;
+3. runs the `setup` commands, then `start`, with `PORT` (a free loopback port), `HOST` and your `env` entries;
+4. polls `ready` (default `/`, up to `readySeconds`, default 120) until the server answers below HTTP 500.
+
+It returns `PROOF_<SERVICE>_URL` for each service, so name a service `app` to get `PROOF_APP_URL`. On close it stops every process and runs `teardown`.
+
+- `app` names the manifest app whose commit the service runs (default: the service name). Several services can run the same app.
+- Placeholders in `setup`, `start`, `env` and `teardown`: `{port}`, `{dir}` (the side's directory), `{src}` (the exported tree), `{id}`, `{slug}` (the id as a safe identifier, unique per run and side; use it for scratch database names) and `{url:<service>}` (an earlier service's URL).
+- Services get only `PATH`, `HOME`, `LANG`, `LC_ALL`, the variables named in `passEnv`, and their own `env`. Secrets stay in your shell; the manifest holds names only.
+- `login` reads the username and password from those environment variables and hands them to the browser checks as `PROOF_USERNAME` and `PROOF_PASSWORD`.
+- `context` becomes `PROOF_CONTEXT_<KEY>`. Command output goes to `service.log` in the side's directory.
+- Commands run as you through `sh -c`, so review a manifest as you would a script.
+
+## Write a custom runtime
+
+When a project needs more than commands (a database snapshot, a container stack), supply a trusted local ESM module with `--runtime`, `PROOFS_RUNTIME` or `.proofs-runtime/runtime.mjs`. A manifest never selects code. See `examples/demo-runtime.mjs`. It exports:
 
 | Hook | Contract |
 | --- | --- |
-| `captureDataset({ dir, workspace, options, signal })` | Optional. Snapshot an approved synthetic source **once per invocation** into private `dir`. Treat the source as read-only. Return the dataset handle the start hook needs. |
-| `startSandbox({ id, dir, workspace, commits, dataset, options, signal })` | Required. Start the exact `{ repo, sha }` pins in `commits`, keyed by app name, with separate writable state in this side's `dir`. Return `{ env, close }`, where `close()` tears down only this side. Roll back partial startup on error and honor cancellation. |
+| `captureDataset({ dir, workspace, options, signal })` | Optional. Snapshot an approved synthetic source once per run into `dir`; return the handle `startSandbox` needs. |
+| `startSandbox({ id, dir, workspace, commits, dataset, options, signal })` | Required. Start the exact `{ repo, sha }` pins in `commits` (keyed by app) with writable state in this side's `dir`. Return `{ env, close }`; `close()` tears down only this side. Roll back on error and honor `signal`. |
 
-Return at least one `PROOF_<NAME>_URL`, such as `PROOF_APP_URL` or `PROOF_API_URL`, as an HTTP(S) **origin** on loopback with no path, query, credentials, or fragment. Use a distinct dynamically assigned listener or isolated routing per side and run. The API adapter verifies HTTPS certificates; for a private CA, return `NODE_EXTRA_CA_CERTS` pointing to a regular CA file inside that side's runtime directory. The BDD browser ignores certificate errors for local HTTPS, so its results do not verify TLS trust. Optional `PROOF_CONTEXT_<NAME>` values are nonsecret synthetic context. For local authentication, trusted browser checks can use `PROOF_USERNAME` and `PROOF_PASSWORD`; API folders can opt in to per-origin headers from `PROOF_API_HEADERS` (see the [API guide](api/README.md)).
+`env` must contain at least one `PROOF_<NAME>_URL`: an HTTP(S) **origin** on loopback, with no path, query, credentials or fragment, on a distinct port per side. Optional values:
 
-**Trust boundary:** The runtime and authored browser step code execute as the local OS user. Review them before running them; this is not a security sandbox for untrusted code. The harness limits the adapters' HTTP destinations and filters what it passes to them. Your runtime is responsible for making its listeners, dependencies, and writable state private, for using the actual pinned code, and for preventing application egress when needed. Never point a proof at production, shared dev, or a customer system. Do not reuse ordinary app credentials. If you cannot establish isolation, block the run.
+- `PROOF_CONTEXT_<NAME>`: non-secret context for checks.
+- `PROOF_USERNAME` / `PROOF_PASSWORD`: browser login.
+- `PROOF_API_HEADERS`: per-origin `authorization` or `cookie` headers for API folders with `"auth": "runtime"`.
+- `NODE_EXTRA_CA_CERTS`: a CA file inside the side's directory, for private HTTPS. The browser ignores local certificate errors, so it does not verify TLS trust.
 
-## Run and read the report
+**Trust boundary:** the runtime and the authored browser steps run as your OS user. Review them first; this is not a sandbox. The harness restricts the adapters' HTTP destinations and the environment it passes them. Your runtime must keep its listeners and state private and run the pinned code. Never point a proof at production, shared dev or a customer system, and don't reuse ordinary app credentials. If you can't isolate it, block the run.
 
-Set `HARNESS` to the harness checkout, `WORKSPACE` to the proof workspace, and `RUNTIME` to the trusted module path. For example:
+## How a run works
+
+`--plan` resolves pins and the proof-input digest without importing the runtime or writing output. A live run freezes the checks, ACs and CSVs, then starts Before and After separately. BDD and API checks on the same side share that side's state, so use separate records or restore what you change. Each adapter has a five-minute limit after startup.
+
+After merge, run `--post-merge` with the original checks. It resolves only each app's `mergedRef` and fills Before with `Not run — post-merge verification`. Compare the `Proof inputs digest` with the pre-merge plan: it covers checks, ACs and CSVs, **not** runtime code, app pins or the dataset, so record those differences separately.
+
+## Try the example
+
+Linux, Node.js 22+ and Git:
 
 ```bash
-node "$HARNESS/run.mjs" TEAM-42 --workspace "$WORKSPACE" --runtime "$RUNTIME" --plan
-node "$HARNESS/run.mjs" TEAM-42 --workspace "$WORKSPACE" --runtime "$RUNTIME"
+npm --prefix api ci
+npm --prefix bdd ci
+npm --prefix bdd exec -- playwright install chromium
+node examples/built-in-demo.mjs
 ```
 
-`--plan` resolves the pins and proof-input digest without importing the runtime, starting services, or writing output. The live run freezes the check files, AC definitions, and CSVs before starting either side. Each side gets its own runtime; BDD and API checks on the **same** side share that side's state, so use separate records or restore what you change. Each surface has a five-minute deadline after startup.
-
-Read `.proofs-out/<ID>/<run-id>/report.md` in the workspace. Its revision header lists the exact full commit IDs. Every AC uses the same three columns:
-
-| AC | Before | After |
-| --- | --- | --- |
-| AC1 — The confirmation shows the saved item name. | Fail — the confirmation opened without the name. | Pass — the confirmation showed “Example Item.” |
-
-A Fail means the check exercised the claimed behavior and contradicted it. A missing fixture, unusable response, missing login, or absent evidence is **Blocked**, not a product failure. A Before pass is valid; don't manufacture a regression. The command exits nonzero for blockers or a nonpassing After. Keep reports concrete and free of private values.
-
-## Verify after merge
-
-Use a fresh verifier, the original authored checks, and the same harness/runtime version. Add `--post-merge` to the commands above. The runner resolves only each app's `mergedRef`; it does not need the original coding worktrees. Compare the `Proof inputs digest` from `--plan` with the pre-merge handoff. It covers the checks, AC definitions, and CSVs, **not** runtime code, app pins, or the database snapshot. Record differences in runtime or fixture separately. The live run uses a fresh local dataset and fills the Before column with `Not run — post-merge verification`. Only observations measured in this run count as evidence.
+It builds a tiny local app at two commits and runs real browser and API checks both ways: the built-in runtime comparing Before and After, then `--url` against the After build served on this machine's network address. No Docker, database or login. `examples/demo.mjs` is a second demo that adds a custom runtime (`demo-runtime.mjs`), `--plan` digests and post-merge verification.
 
 ## License
 

@@ -61,20 +61,20 @@ function parseApiHeaders(raw, origins, credentials) {
   })));
 }
 
-async function adapterEnv(sandbox, { ticket }, side, dir, sandboxDir, parentEnv) {
+async function adapterEnv(sandbox, { ticket, target }, side, dir, sandboxDir, parentEnv) {
   const env = Object.fromEntries(['PATH', 'LANG', 'LC_ALL'].filter(key => parentEnv[key] !== undefined).map(key => [key, parentEnv[key]]));
   if (!record(sandbox.env)) throw new Error('Sandbox environment is required.');
   const origins = new Set();
   for (const [key, value] of Object.entries(sandbox.env)) {
     if (proofUrlKey.test(key)) {
-      env[key] = localOrigin(value);
+      env[key] = localOrigin(value, !!target);
       origins.add(key);
     } else if (proofContextKey.test(key) && !key.endsWith('_URL')) {
       if (typeof value !== 'string' || !/^[\x20-\x7e]{1,256}$/.test(value) || !value.trim()) throw new Error('Invalid runtime context.');
       env[key] = value;
     }
   }
-  if (!origins.size) throw new Error('At least one loopback sandbox origin is required.');
+  if (!origins.size) throw new Error('At least one sandbox origin is required.');
   const credentials = new Set();
   const bdd = {};
   for (const key of CREDENTIAL_KEYS) {
@@ -88,7 +88,13 @@ async function adapterEnv(sandbox, { ticket }, side, dir, sandboxDir, parentEnv)
   const api = sandbox.env.PROOF_API_HEADERS === undefined ? {} : {
     PROOF_API_HEADERS: parseApiHeaders(sandbox.env.PROOF_API_HEADERS, origins, credentials),
   };
-  if (sandbox.env.NODE_EXTRA_CA_CERTS !== undefined) {
+  if (target) {
+    // A running environment may use a private CA: pass the operator's own CA file through, plus the TLS switch.
+    const ca = parentEnv.NODE_EXTRA_CA_CERTS;
+    if (typeof ca === 'string' && isAbsolute(ca)) env.NODE_EXTRA_CA_CERTS = ca;
+    env.PROOF_TARGET = '1';
+    if (target.insecureTls) env.PROOF_INSECURE_TLS = '1';
+  } else if (sandbox.env.NODE_EXTRA_CA_CERTS !== undefined) {
     const caPath = sandbox.env.NODE_EXTRA_CA_CERTS;
     const rel = typeof caPath === 'string' && isAbsolute(caPath) ? relative(sandboxDir, caPath) : null;
     if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel) || await realpath(caPath) !== caPath) {
@@ -207,6 +213,9 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
   return outcome;
 }
 
+// Target mode starts nothing: the sandbox is the running environment the operator named with --url.
+const targetRuntime = target => ({ startSandbox: async () => ({ env: { ...target.env }, close: async () => {} }) });
+
 async function runPhases(input, snapshot, id, scratch, options) {
   const { signal } = options;
   const sides = Object.keys(input.commits);
@@ -226,7 +235,7 @@ async function runPhases(input, snapshot, id, scratch, options) {
     }
     stage = 'runtime loading';
     // This is explicitly selected trusted same-user code, never a path from the ticket.
-    runtime = options.startSandbox ? options : await import(pathToFileURL(input.runtime).href);
+    runtime = input.target ? targetRuntime(input.target) : options.startSandbox ? options : await import(pathToFileURL(input.runtime).href);
     if (typeof runtime.startSandbox !== 'function' || (runtime.captureDataset !== undefined && typeof runtime.captureDataset !== 'function')) {
       throw new Error('Invalid runtime exports.');
     }

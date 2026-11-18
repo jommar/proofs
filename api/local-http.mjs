@@ -1,15 +1,17 @@
 import http from 'node:http';
 import https from 'node:https';
 import { isIP } from 'node:net';
-import { loopbackAddress } from '../lib/origins.mjs';
+import { loopbackAddress, targetMode } from '../lib/origins.mjs';
 
 const maxBytes = 2 * 1024 * 1024;
 const jsonDecoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
-// Connect directly to loopback, without DNS/proxy discovery; preserve Host and TLS SNI.
+// Local runs connect directly to loopback, without DNS/proxy discovery; preserve Host and TLS SNI.
+// Target runs (--url) use normal DNS and verified TLS, and only for the origins the operator named.
 export async function exchange(url, { method = 'GET', headers = {}, body } = {}) {
+  const target = targetMode();
   const address = loopbackAddress(url.hostname);
-  if (!address || !['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+  if ((!address && !target) || !['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
     throw new Error('Unsafe request');
   }
   const client = url.protocol === 'https:' ? https : http;
@@ -18,10 +20,12 @@ export async function exchange(url, { method = 'GET', headers = {}, body } = {})
       method,
       headers: body === undefined ? headers : { ...headers, 'content-length': Buffer.byteLength(body) },
       agent: false,
-      family: isIP(address),
-      autoSelectFamily: false,
-      lookup: (_host, _opts, done) => done(null, address, isIP(address)),
-      rejectUnauthorized: true,
+      ...(address && !target ? {
+        family: isIP(address),
+        autoSelectFamily: false,
+        lookup: (_host, _opts, done) => done(null, address, isIP(address)),
+      } : {}),
+      rejectUnauthorized: process.env.PROOF_INSECURE_TLS !== '1',
       signal: AbortSignal.timeout(10_000),
     }, (response) => {
       const { statusCode: status, headers } = response;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { link, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, link, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -118,8 +118,23 @@ test('plan is runnable from another cwd, pins commits, and creates no files', as
   assert.match(output, new RegExp(names[0]));
   assert.match(output, /300 seconds per adapter invocation/);
   assert.equal(execFileSync(process.execPath, [runner, ticket, '--runtime', join(root, 'runtime.mjs'), '--plan'], { cwd: root, encoding: 'utf8' }), output);
-  await assert.rejects(run([ticket, '--plan'], { workspace: root }), /runtime/i);
   await assert.rejects(run([ticket, '--plan', '--runtime', 'missing.mjs'], { workspace: root }), /runtime.*existing/i);
+  // Without a flag, PROOFS_RUNTIME, or a workspace runtime, the built-in command runtime is used; the plan says so.
+  const builtIn = await run([ticket, '--plan'], { workspace: root, parentEnv: {} });
+  assert.match(builtIn.plan, /Runtime: built-in command runtime/);
+  assert.match(output, /Runtime: runtime\.mjs/);
+  // PROOFS_RUNTIME stands in for --runtime; the flag wins when both are given.
+  const viaEnv = await run([ticket, '--plan'], { workspace: root, parentEnv: { PROOFS_RUNTIME: join(root, 'runtime.mjs') } });
+  assert.equal(viaEnv.plan, output.trimEnd());
+  await assert.rejects(
+    run([ticket, '--plan', '--runtime', 'missing.mjs'], { workspace: root, parentEnv: { PROOFS_RUNTIME: join(root, 'runtime.mjs') } }),
+    /runtime.*existing/i,
+  );
+  // A workspace's own .proofs-runtime/runtime.mjs is the default when nothing else is chosen.
+  await mkdir(join(root, '.proofs-runtime'));
+  await copyFile(join(root, 'runtime.mjs'), join(root, '.proofs-runtime', 'runtime.mjs'));
+  const viaWorkspace = await run([ticket, '--plan'], { workspace: root, parentEnv: {} });
+  assert.match(viaWorkspace.plan, /Runtime: \.proofs-runtime\/runtime\.mjs/);
   assert.ok(!(await readdir(root)).includes('.proofs-out'));
   assert.equal(git(worktree, 'status', '--porcelain'), '');
   assert.equal(git(worktree, 'rev-parse', 'HEAD'), sha);
@@ -667,4 +682,74 @@ test('rejects origin-shaped URLs with paths or credentials and invalid header/co
     assert.match(report, /sandbox environment validation/);
     assert.doesNotMatch(report, /secret|wrong-host|other-localhost/);
   }
+});
+
+test('--url checks a running environment: no runtime, no pins, apps optional, bad flags rejected', async t => {
+  const { root, manifest, save } = await workspace(t);
+  delete manifest.apps;
+  await save();
+  const plan = await run([ticket, '--url', 'legacy=https://trips.example.test', '--context', 'tenant=acme', '--branch', 'feature/x', '--plan'], { workspace: root, parentEnv: {} });
+  assert.match(plan.plan, /Mode: target verification/);
+  assert.match(plan.plan, /`legacy`: `https:\/\/trips\.example\.test`/);
+  assert.match(plan.plan, /Branch label: `feature\/x` \(stated by the operator, not verified\)/);
+  assert.match(plan.plan, /Runtime: none \(running environment\)/);
+  assert.match(plan.plan, /No sandbox is started/);
+  assert.ok(!(await readdir(root)).includes('.proofs-out'));
+  const reject = (args, pattern) => assert.rejects(run([ticket, ...args, '--plan'], { workspace: root, parentEnv: {} }), pattern);
+  await reject(['--url', 'ftp://trips.example.test'], /Invalid origin/);
+  await reject(['--url', 'https://trips.example.test/admin'], /Invalid origin/);
+  await reject(['--url', 'https://user:pw@trips.example.test'], /Invalid origin/);
+  await reject(['--url', 'a=https://x.test', '--url', 'a=https://y.test'], /once/);
+  await reject(['--url', 'bad name=https://x.test'], /names must be/);
+  await reject(['--url', 'https://x.test', '--post-merge'], /do not combine/);
+  await reject(['--url', 'https://x.test', '--runtime', 'runtime.mjs'], /do not combine/);
+  await reject(['--context', 'tenant=acme'], /only with --url/);
+  await reject(['--branch', 'x'], /only with --url/);
+  await reject(['--insecure-tls'], /only with --url/);
+  // A manifest cannot enable target mode, and without --url the loopback rule still applies.
+  await assert.rejects(execute(root, { startSandbox: async () => ({ env: { PROOF_APP_URL: 'https://trips.example.test' }, close: async () => {} }), invoke: async () => 0 }), /./);
+});
+
+test('--url runs only the After side against the named origins and passes the operator login through', async t => {
+  const { root } = await workspace(t);
+  await adapter(root);
+  const calls = [];
+  const parentEnv = { PATH: process.env.PATH, PROOF_USERNAME: 'fake-operator-user', PROOF_PASSWORD: 'fake-operator-pass', NODE_EXTRA_CA_CERTS: '/etc/ssl/fake-ca.pem', OTHER_SECRET: 'withheld' };
+  const outcome = await run([ticket, '--url', 'legacy=https://trips.example.test:8443', '--context', 'tenant=acme', '--branch', 'feature/x', '--insecure-tls'], {
+    workspace: root, parentEnv,
+    invoke: async ({ name, env }) => {
+      calls.push({ name, env });
+      await writeResults(env.PROOF_RESULTS, [result('pass', 'the check passed against the environment')]);
+      return 0;
+    },
+  });
+  assert.equal(outcome.exitCode, 0);
+  assert.equal(calls.length, 1, 'only one side runs');
+  const { env } = calls[0];
+  assert.equal(env.PROOF_SIDE, 'after');
+  assert.equal(env.PROOF_LEGACY_URL, 'https://trips.example.test:8443');
+  assert.equal(env.PROOF_CONTEXT_TENANT, 'acme');
+  assert.equal(env.PROOF_TARGET, '1');
+  assert.equal(env.PROOF_INSECURE_TLS, '1');
+  assert.equal(env.NODE_EXTRA_CA_CERTS, '/etc/ssl/fake-ca.pem');
+  assert.deepEqual([env.PROOF_USERNAME, env.PROOF_PASSWORD], ['fake-operator-user', 'fake-operator-pass'], 'the BDD adapter gets the operator login');
+  assert.equal(env.OTHER_SECRET, undefined);
+  const report = await readFile(outcome.reportPath, 'utf8');
+  assert.match(report, /Mode: target verification/);
+  assert.match(report, /## Target/);
+  assert.match(report, /Not run — target verification \| Pass — bdd: pass/);
+  assert.doesNotMatch(report, /fake-operator-pass/);
+});
+
+test('--url without --insecure-tls verifies TLS and does not forward the flag', async t => {
+  const { root } = await workspace(t);
+  await adapter(root, 'api');
+  let seen;
+  await run([ticket, '--url', 'https://trips.example.test'], {
+    workspace: root, parentEnv: { PATH: process.env.PATH },
+    invoke: async ({ env }) => { seen = env; await writeResults(env.PROOF_RESULTS, [result()]); return 0; },
+  });
+  assert.equal(seen.PROOF_APP_URL, 'https://trips.example.test');
+  assert.equal(seen.PROOF_INSECURE_TLS, undefined);
+  assert.equal(seen.NODE_EXTRA_CA_CERTS, undefined);
 });

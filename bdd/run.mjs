@@ -93,7 +93,7 @@ async function main() {
     await symlink(join(directory, 'node_modules'), join(scratch, 'node_modules'), 'dir');
     const envKeys = new Set([
       'PATH', 'LANG', 'LC_ALL', 'PROOF_CSV_DIR', 'PROOF_SIDE', 'PROOF_TICKET',
-      'PROOF_USERNAME', 'PROOF_PASSWORD',
+      'PROOF_USERNAME', 'PROOF_PASSWORD', 'PROOF_TARGET', 'PROOF_INSECURE_TLS',
     ]);
     const env = Object.fromEntries(Object.entries(process.env)
       .filter(([key]) => envKeys.has(key) || (proofContextKey.test(key) && !key.endsWith('_URL'))));
@@ -125,7 +125,7 @@ async function main() {
         use: {
           browserName: 'chromium', headless: true,
           trace: 'off', screenshot: 'off', video: 'off', serviceWorkers: 'block',
-          ignoreHTTPSErrors: true,
+          ignoreHTTPSErrors: ${process.env.PROOF_TARGET !== '1' || process.env.PROOF_INSECURE_TLS === '1'},
           proxy: { server: ${JSON.stringify(proxy.url)}, bypass: '<-loopback>' },
           launchOptions: { args: ['--disable-quic', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'] },
         },
