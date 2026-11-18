@@ -72,6 +72,7 @@ test('runs setup before start and teardown on close, and forwards only named var
   const sandbox = await startSandbox({ id: 'proof-y-after', dir: join(root, 'side'), commits: { app: { repo, sha: commits[1] } }, options, signal: new AbortController().signal });
   assert.equal(await body(sandbox.env.PROOF_APP_URL), 'true:ok:');
   assert.deepEqual([sandbox.env.PROOF_USERNAME, sandbox.env.PROOF_PASSWORD], ['u', 'p']);
+  assert.equal(sandbox.env.PROOF_API_HEADERS, undefined);
   assert.equal(existsSync(marker), false);
   await sandbox.close();
   assert.equal(existsSync(marker), true);
@@ -80,14 +81,14 @@ test('runs setup before start and teardown on close, and forwards only named var
 test('a service that never listens fails the start and leaves nothing running', async t => {
   const { root, repo, commits } = await fixture(t);
   const options = { services: { app: { start: 'sleep 30', readySeconds: 1 } } };
-  await assert.rejects(startSandbox({ id: 'proof-z', dir: join(root, 'side'), commits: { app: { repo, sha: commits[0] } }, options, signal: new AbortController().signal }), /ready/);
+  await assert.rejects(startSandbox({ id: 'proof-z', dir: join(root, 'side'), commits: { app: { repo, sha: commits[0] } }, options, signal: new AbortController().signal }), /app: start failed \(did not answer \/ within 1s\)/);
 });
 
 test('a failing setup command and a canceled start both reject', async t => {
   const { root, repo, commits } = await fixture(t);
   const pins = { app: { repo, sha: commits[0] } };
   await assert.rejects(startSandbox({ id: 'proof-s', dir: join(root, 'a'), commits: pins, signal: new AbortController().signal,
-    options: { services: { app: { setup: ['exit 3'], start: 'node server.js' } } } }), /command failed/);
+    options: { services: { app: { setup: ['exit 3'], start: 'node server.js' } } } }), /app: setup command 1 failed \(exited with code 3\)/);
   const controller = new AbortController();
   controller.abort(new Error('canceled'));
   await assert.rejects(startSandbox({ id: 'proof-c', dir: join(root, 'b'), commits: pins, signal: controller.signal,

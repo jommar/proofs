@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { copyFile, link, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,7 +54,8 @@ async function adapter(root, name = 'bdd') {
 async function fixtureRunner(t, code) {
   const harness = await mkdtemp(join(tmpdir(), 'copied-proof-harness-'));
   t.after(() => rm(harness, { recursive: true, force: true }));
-  for (const dir of ['bdd', 'lib']) await mkdir(join(harness, dir));
+  for (const dir of ['bdd', 'lib', 'runtime']) await mkdir(join(harness, dir));
+  await writeFile(join(harness, 'runtime', 'command.mjs'), await readFile(new URL('../runtime/command.mjs', import.meta.url)));
   await writeFile(join(harness, 'run.mjs'), await readFile(runner));
   for (const file of await readdir(new URL('../lib/', import.meta.url))) {
     await writeFile(join(harness, 'lib', file), await readFile(new URL(`../lib/${file}`, import.meta.url)));
@@ -120,6 +122,9 @@ test('plan is runnable from another cwd, pins commits, and creates no files', as
   assert.equal(execFileSync(process.execPath, [runner, ticket, '--runtime', join(root, 'runtime.mjs'), '--plan'], { cwd: root, encoding: 'utf8' }), output);
   await assert.rejects(run([ticket, '--plan', '--runtime', 'missing.mjs'], { workspace: root }), /runtime.*existing/i);
   // Without a flag, PROOFS_RUNTIME, or a workspace runtime, the built-in command runtime is used; the plan says so.
+  await assert.rejects(run([ticket, '--plan'], { workspace: root, parentEnv: {} }), /runtimeOptions\.services.*--url/s);
+  manifest.runtimeOptions = { services: { app: { start: 'node server.js' } } };
+  await save();
   const builtIn = await run([ticket, '--plan'], { workspace: root, parentEnv: {} });
   assert.match(builtIn.plan, /Runtime: built-in command runtime/);
   assert.match(output, /Runtime: runtime\.mjs/);
@@ -752,4 +757,88 @@ test('--url without --insecure-tls verifies TLS and does not forward the flag', 
   assert.equal(seen.PROOF_APP_URL, 'https://trips.example.test');
   assert.equal(seen.PROOF_INSECURE_TLS, undefined);
   assert.equal(seen.NODE_EXTRA_CA_CERTS, undefined);
+});
+
+const SERVER = `node -e "require('node:http').createServer((q, s) => s.end('ok')).listen(Number(process.env.PORT), '127.0.0.1')"`;
+const builtIn = (manifest, services) => { manifest.runtimeOptions = { services }; };
+
+test('a built-in runtime startup failure names the service, step and exit code in the report', async t => {
+  const { root, manifest, save } = await workspace(t);
+  builtIn(manifest, { app: { app: names[0], setup: ['true', 'exit 3'], start: 'node nothing.js' } });
+  await save();
+  await adapter(root);
+  const outcome = await run([ticket], { workspace: root, parentEnv: { PATH: process.env.PATH }, invoke: async () => assert.fail('no adapter runs when startup fails') });
+  assert.equal(outcome.exitCode, 1);
+  const report = await readFile(outcome.reportPath, 'utf8');
+  assert.match(report, /before: Failed during sandbox startup: app: setup command 2 failed \(exited with code 3\)\./);
+  assert.match(report, /after: Failed during sandbox startup: app: setup command 2 failed/);
+  assert.doesNotMatch(report, /nothing\.js|node -e/, 'command text is never shown');
+});
+
+test('--check starts each side without running adapters and leaves no report', async t => {
+  const { root, manifest, save } = await workspace(t);
+  builtIn(manifest, { app: { app: names[0], start: SERVER } });
+  await save();
+  await adapter(root);
+  const noAdapters = { workspace: root, parentEnv: { PATH: process.env.PATH }, invoke: async () => assert.fail('--check must not run adapters') };
+  const ready = await run([ticket, '--check'], noAdapters);
+  assert.equal(ready.exitCode, 0);
+  assert.equal(ready.check, 'Before: ready\nAfter: ready');
+  assert.deepEqual(await readdir(join(root, '.proofs-out', ticket)), [], 'the check run directory is removed');
+
+  builtIn(manifest, { app: { app: names[0], start: 'exit 5' } });
+  await save();
+  const broken = await run([ticket, '--check'], noAdapters);
+  assert.equal(broken.exitCode, 1);
+  assert.match(broken.check, /Before: NOT READY — Failed during sandbox startup: app: start failed \(exited with code 5 before it became ready\)\./);
+});
+
+test('--check --url probes each origin and --only limits the adapters that run', async t => {
+  const { root } = await workspace(t);
+  await adapter(root, 'bdd');
+  await adapter(root, 'api');
+  const server = createServer((q, s) => s.end('ok')).listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const up = `http://127.0.0.1:${server.address().port}`;
+  const check = url => run([ticket, '--check', '--url', `legacy=${url}`], { workspace: root, parentEnv: { PATH: process.env.PATH }, invoke: async () => assert.fail('no adapters') });
+  assert.deepEqual(await check(up), { exitCode: 0, check: 'Target: ready' });
+  const down = await check('http://127.0.0.1:1');
+  assert.equal(down.exitCode, 1);
+  assert.equal(down.check, 'Target: NOT READY — legacy is not reachable (DNS, connection or TLS).');
+
+  const ran = [];
+  await run([ticket, '--url', up, '--only', 'api'], {
+    workspace: root, parentEnv: { PATH: process.env.PATH },
+    invoke: async ({ name, env }) => { ran.push(name); await writeResults(env.PROOF_RESULTS, [result()]); return 0; },
+  });
+  assert.deepEqual(ran, ['api']);
+  await assert.rejects(run([ticket, '--only', 'sql', '--plan'], { workspace: root, parentEnv: {} }), /Usage/);
+  await assert.rejects(run([ticket, '--only', 'api', '--only', 'api', '--plan'], { workspace: root, parentEnv: {} }), /Usage/);
+});
+
+test('manifest login names env variables; the workspace .env fills gaps and the real environment wins', async t => {
+  const { root, manifest, save } = await workspace(t);
+  manifest.login = { usernameEnv: 'FAKE_APP_USER', passwordEnv: 'FAKE_APP_PASS' };
+  await save();
+  await adapter(root);
+  await writeFile(join(root, '.env'), '# comment\nFAKE_APP_USER=file-user\nexport FAKE_APP_PASS="file pass $NOT_EXPANDED"\nUNRELATED=ignored\n');
+  const seen = [];
+  const invoke = async ({ env }) => { seen.push(env); await writeResults(env.PROOF_RESULTS, [result()]); return 0; };
+  const go = parentEnv => run([ticket, '--url', 'https://trips.example.test'], { workspace: root, parentEnv: { PATH: process.env.PATH, ...parentEnv }, invoke });
+
+  await go({});
+  assert.deepEqual([seen[0].PROOF_USERNAME, seen[0].PROOF_PASSWORD], ['file-user', 'file pass $NOT_EXPANDED'], 'read from .env without shell expansion');
+  assert.equal(seen[0].UNRELATED, undefined);
+
+  await go({ FAKE_APP_USER: 'env-user' });
+  assert.deepEqual([seen[1].PROOF_USERNAME, seen[1].PROOF_PASSWORD], ['env-user', 'file pass $NOT_EXPANDED'], 'the real environment overrides the file');
+
+  await rm(join(root, '.env'));
+  await go({});
+  assert.equal(seen[2].PROOF_USERNAME, undefined, 'no login values means no login is passed');
+
+  manifest.login = { usernameEnv: 'literal-secret value', passwordEnv: 'FAKE_APP_PASS' };
+  await save();
+  await assert.rejects(go({}), /names of environment variables, never their values/);
 });

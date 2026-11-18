@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import http from 'node:http';
+import https from 'node:https';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -12,9 +14,23 @@ import { readProofInputs, stageProofInputs, unlockProofInputs } from './lib/snap
 const CREDENTIAL_KEYS = ['PROOF_USERNAME', 'PROOF_PASSWORD'];
 const ADAPTER_TIMEOUT_MS = 5 * 60_000;
 
-function runIssue(stage, signal) {
+// Only errors a runtime marks proofSafe (names and exit codes, never command text or output) are shown.
+function runIssue(stage, signal, error) {
   if (signal.aborted) return 'Run canceled.';
-  return `Failed during ${stage}.`;
+  return `Failed during ${stage}${error?.proofSafe ? `: ${error.message}` : ''}.`;
+}
+
+// Any HTTP answer (even 401/404) proves the host is reachable; TLS is verified unless --insecure-tls.
+function reachable(origin, insecure) {
+  return new Promise(resolve => {
+    const client = origin.startsWith('https:') ? https : http;
+    const request = client.request(origin, { method: 'HEAD', agent: false, rejectUnauthorized: !insecure, signal: AbortSignal.timeout(15_000) }, response => {
+      response.resume();
+      resolve(true);
+    });
+    request.on('error', () => resolve(false));
+    request.end();
+  });
 }
 
 async function privateDir(path, existing = false) {
@@ -150,13 +166,18 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
     signal.throwIfAborted();
     sandbox = await startSandbox({
       id: `proof-${id}-${side}`, dir: sandboxDir, workspace: input.workspace, dataset,
-      commits: structuredClone(input.commits[side]), options: structuredClone(input.runtimeOptions), signal,
+      commits: structuredClone(input.commits[side]), options: structuredClone(input.runtimeOptions), env: input.env, signal,
     });
     if (typeof sandbox?.close !== 'function') throw new Error('Sandbox close is required.');
     stage = 'sandbox environment validation';
     const { env: shared, scoped, credentials } = await adapterEnv(sandbox, input, side, checksDir, sandboxDir, parentEnv);
     const ids = new Set(input.acs.map(({ id }) => id));
-    for (const adapter of input.adapters) {
+    if (input.check && input.target) {
+      for (const [key, origin] of Object.entries(sandbox.env).filter(([name]) => /^PROOF_[A-Z0-9_]+_URL$/.test(name))) {
+        if (!await reachable(origin, input.target.insecureTls)) outcome.issues.push(`${key.slice(6, -4).toLowerCase()} is not reachable (DNS, connection or TLS).`);
+      }
+    }
+    for (const adapter of input.check ? [] : input.adapters) {
       signal.throwIfAborted();
       const env = { ...shared, ...scoped[adapter.name], PROOF_RESULTS: join(checksDir, `${adapter.name}.ndjson`) };
       const deadline = AbortSignal.timeout(adapterTimeoutMs);
@@ -198,7 +219,7 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
     }
     signal.throwIfAborted();
   } catch (error) {
-    outcome.issues.push(runIssue(stage, signal));
+    outcome.issues.push(runIssue(stage, signal, error));
     // Runtime reports startup plus failed rollback as an AggregateError.
     if ((sandbox && typeof sandbox.close !== 'function') || (!sandbox && error instanceof AggregateError)) outcome.retainSandbox = true;
   } finally {
@@ -245,8 +266,8 @@ async function runPhases(input, snapshot, id, scratch, options) {
       dataset = await runtime.captureDataset({ dir: captureDir, workspace: input.workspace, options: structuredClone(input.runtimeOptions), signal });
       if (dataset == null) throw new Error('Dataset capture returned no dataset.');
     }
-  } catch {
-    const issue = runIssue(stage, signal);
+  } catch (error) {
+    const issue = runIssue(stage, signal, error);
     return Object.fromEntries(sides.map(side => [side, { rows: [], issues: [issue], invoked: false }]));
   }
   const phases = {};
@@ -288,6 +309,14 @@ export async function run(args, {
   } catch {
     phases.after.issues.push('Private run files could not be removed; check the run directory.');
   }
+  if (input.check) {
+    // A readiness check leaves no report: it only says whether each side could start.
+    await rm(runDir, { recursive: true, force: true });
+    const label = { before: 'Before', after: input.target ? 'Target' : 'After' };
+    const lines = Object.entries(phases).map(([side, { issues }]) => issues.length
+      ? `${label[side]}: NOT READY — ${issues.join(' ')}` : `${label[side]}: ready`);
+    return { exitCode: Object.values(phases).some(({ issues }) => issues.length) ? 1 : 0, check: lines.join('\n') };
+  }
   const { report, exitCode } = makeReport(input, id, phases);
   const reportPath = join(runDir, 'report.md');
   await writeFile(reportPath, report, { flag: 'wx', mode: 0o600 });
@@ -301,7 +330,7 @@ async function main() {
   process.on('SIGTERM', cancel);
   try {
     const result = await run(process.argv.slice(2), { signal: controller.signal });
-    console.log(result.plan ?? `Report: ${result.reportPath}`);
+    console.log(result.plan ?? result.check ?? `Report: ${result.reportPath}`);
     process.exitCode = result.exitCode;
   } catch (error) {
     // Native filesystem errors can contain arbitrary input paths; do not forward them.

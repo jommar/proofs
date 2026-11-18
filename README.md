@@ -14,6 +14,7 @@ node proofs/run.mjs TEAM-42 --plan           # resolve pins, input digest and ru
 node proofs/run.mjs TEAM-42                  # local comparison: Before and After
 node proofs/run.mjs TEAM-42 --post-merge     # after merge: merged branch only
 node proofs/run.mjs TEAM-42 --url https://dev.example.com --branch feature/x   # a running environment
+node proofs/run.mjs TEAM-42 --check          # start (or probe) only; run no ACs
 ```
 
 Run from the workspace root, or add `--workspace <path>`. The runtime is chosen in this order: `--runtime <path>`, `PROOFS_RUNTIME`, the workspace's `.proofs-runtime/runtime.mjs`, then the [built-in runtime](#built-in-runtime). The plan prints which one. Read `.proofs-out/TEAM-42/<run-id>/report.md`: one row per AC with a Before and an After column.
@@ -25,6 +26,10 @@ Run from the workspace root, or add `--workspace <path>`. The runtime is chosen 
 | Blocked | A fixture, login, response or evidence was missing. This is not a product failure. |
 
 A Before pass is valid; don't manufacture a regression. The command exits nonzero for any blocker or a nonpassing After.
+
+**Is the environment broken, or did the AC fail?** `--check` starts each side (or, with `--url`, probes each origin) and prints `ready` or `NOT READY — <cause>` without running any AC. A startup failure in a run's report names the service, step and exit code, for example `app: setup command 2 failed (exited with code 3)`; command text and output are never shown. `--plan` already fails with a clear message when the built-in runtime is selected but the manifest has no `runtimeOptions.services`.
+
+`--only bdd` or `--only api` (repeatable) runs just those adapters; the other ACs report as uncovered. Use it to keep a read-only run away from checks that write.
 
 ## Test a running environment
 
@@ -39,7 +44,8 @@ node proofs/run.mjs TEAM-42 --url web=https://dev.example.com --url api=https://
 - `--url [name=]<origin>` is repeatable. An origin is `http(s)://host[:port]`, with no path, query or credentials. A bare origin is named `app` and reaches the checks as `PROOF_APP_URL`; `web=...` becomes `PROOF_WEB_URL`. Checks reference these names, so a ticket's checks work against any environment.
 - `--context key=value` becomes `PROOF_CONTEXT_<KEY>` (for example a tenant or client slug).
 - `--branch <name>` is a label printed in the report for the branch the environment is expected to serve. It is not verified; the harness cannot see what a remote environment deployed.
-- **Logins** come from your shell, never from a flag or manifest: set `PROOF_USERNAME` and `PROOF_PASSWORD` (browser checks) and, for API folders with `"auth": "runtime"`, `PROOF_API_HEADERS` (a JSON map from URL name to `authorization` or `cookie` headers).
+- **Logins** are never values in a flag or manifest. Either set `PROOF_USERNAME` and `PROOF_PASSWORD` (browser checks), or add a top-level `"login": { "usernameEnv": "APP_DEV_USER", "passwordEnv": "APP_DEV_PASS" }` to the manifest naming the variables that hold them. For API folders with `"auth": "runtime"`, set `PROOF_API_HEADERS` (a JSON map from URL name to `authorization` or `cookie` headers).
+- The variables come from your environment, then from `<workspace>/.env`. The file is plain `KEY=VALUE` lines (quotes allowed, no expansion) and the real environment wins. Only the variables the harness looks up are used, and values never appear in reports or output.
 - TLS is verified. For a private CA set `NODE_EXTRA_CA_CERTS=<absolute path>`. `--insecure-tls` skips certificate checks (for example a local mkcert setup); use it only on environments you control.
 - The manifest needs only `acs`. `apps` is ignored.
 - The adapters can reach only the origins you listed. **Checks that create or change data change that environment**, so write checks that are safe for where you point them, and never aim a write check at production.
@@ -112,7 +118,7 @@ It returns `PROOF_<SERVICE>_URL` for each service, so name a service `app` to ge
 - `app` names the manifest app whose commit the service runs (default: the service name). Several services can run the same app.
 - Placeholders in `setup`, `start`, `env` and `teardown`: `{port}`, `{dir}` (the side's directory), `{src}` (the exported tree), `{id}`, `{slug}` (the id as a safe identifier, unique per run and side; use it for scratch database names) and `{url:<service>}` (an earlier service's URL).
 - Services get only `PATH`, `HOME`, `LANG`, `LC_ALL`, the variables named in `passEnv`, and their own `env`. Secrets stay in your shell; the manifest holds names only.
-- `login` reads the username and password from those environment variables and hands them to the browser checks as `PROOF_USERNAME` and `PROOF_PASSWORD`.
+- `login` (also valid at the manifest's top level, where it serves both modes) names the environment variables that hold the username and password, and hands them to the browser checks as `PROOF_USERNAME` and `PROOF_PASSWORD`. They are read from your environment, then `<workspace>/.env`.
 - `context` becomes `PROOF_CONTEXT_<KEY>`. Command output goes to `service.log` in the side's directory.
 - Commands run as you through `sh -c`, so review a manifest as you would a script.
 
