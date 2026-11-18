@@ -1,25 +1,36 @@
 # Proofs
 
-Check a finished change against its acceptance criteria (ACs), two ways:
+Check a finished change against its acceptance criteria (ACs). A run executes a ticket's checks against **one target**, exactly one of:
 
-- **A local checkout:** `--worktree <dir>` starts the app from that directory (the base or the feature branch) and runs the checks against it. Run it once per branch and compare the two reports. The older single-command Before/After comparison and post-merge mode also remain.
+- **A local checkout:** `--worktree <dir>` starts the app from that Git checkout (the base or the feature branch) and runs the checks against it. Run it once per branch and compare the two reports.
 - **A running environment:** `--url <origin>` runs the checks against a URL you name (local, dev, UAT, or any live site). Nothing is started.
 
 Use [Gherkin + Playwright](bdd/README.md) for what a user sees and [Bruno](api/README.md) for HTTP. No ticket tracker, database or container engine is required.
+
+## Try the example
+
+Linux, Node.js 22+ and Git:
+
+```bash
+npm --prefix api ci
+npm --prefix bdd ci
+npm --prefix bdd exec -- playwright install chromium
+node examples/built-in-demo.mjs
+```
+
+It builds a tiny inventory app with a base commit and a feature commit as two Git worktrees, then runs the same real browser and API checks against the base (both ACs fail), the feature (both pass) and the feature build served on this machine's network address (`--url`, pass). No Docker, database or login.
 
 ## Run a ticket
 
 ```bash
 node proofs/run.mjs TEAM-42 --worktree ~/work/app-feature --login APP_USER,APP_PASS   # one local checkout
 node proofs/run.mjs TEAM-42 --worktree ~/work/app-base    --login APP_USER,APP_PASS   # the base, to compare
-node proofs/run.mjs TEAM-42 --plan           # resolve pins, input digest and runtime; starts nothing
-node proofs/run.mjs TEAM-42                  # local comparison: Before and After from the manifest's pins
-node proofs/run.mjs TEAM-42 --post-merge     # after merge: merged branch only
-node proofs/run.mjs TEAM-42 --url https://dev.example.com --branch feature/x   # a running environment
-node proofs/run.mjs TEAM-42 --check          # start (or probe) only; run no ACs
+node proofs/run.mjs TEAM-42 --url https://dev.example.com --branch feature/x         # a running environment
+node proofs/run.mjs TEAM-42 --worktree ~/work/app-feature --plan    # resolve inputs, digest and runtime; starts nothing
+node proofs/run.mjs TEAM-42 --worktree ~/work/app-feature --check   # start (or probe) only; run no ACs
 ```
 
-Run from the workspace root (where your app repos are), or add `--workspace <path>`. The runtime is chosen in this order: `--runtime <path>`, `PROOFS_RUNTIME`, the workspace's `.proofs-runtime/runtime.mjs`, then the [built-in runtime](#built-in-runtime). The plan prints which one. Read `.proofs-out/TEAM-42/<run-id>/report.md`: one row per AC with a Before and an After column.
+A run without `--url` or `--worktree` fails with `Give a target`. Add `--workspace <path>` if you are not in the directory the paths are relative to. Read `.proofs-out/TEAM-42/<run-id>/report.md`: one row per AC with a single Result column.
 
 | Result | Meaning |
 | --- | --- |
@@ -27,23 +38,23 @@ Run from the workspace root (where your app repos are), or add `--workspace <pat
 | Fail | The check exercised the claimed behavior and contradicted it. |
 | Blocked | A fixture, login, response or evidence was missing. This is not a product failure. |
 
-A Before pass is valid; don't manufacture a regression. The command exits nonzero for any blocker or a nonpassing After.
+The command exits nonzero for any blocker, uncovered AC or nonpassing result. A pass on the base is a valid result; don't manufacture a regression.
 
-**Is the environment broken, or did the AC fail?** `--check` starts each side (or, with `--url`, probes each origin) and prints `ready` or `NOT READY — <cause>` without running any AC. A startup failure in a run's report names the service, step and exit code, for example `app: setup command 2 failed (exited with code 3)`; command text and output are never shown. `--plan` already fails with a clear message when the built-in runtime is selected but the manifest has no `runtimeOptions.services`.
+**Is the environment broken, or did the AC fail?** `--check` starts the checkout (or, with `--url`, probes each origin) and prints `ready` or `NOT READY — <cause>` without running any AC. A startup failure in a report names the service, step and exit code, for example `app: setup command 2 failed (exited with code 3)`; command text and output are never shown.
 
 `--only bdd` or `--only api` (repeatable) runs just those adapters; the other ACs report as uncovered. Use it to keep a read-only run away from checks that write.
 
 ## Test a local checkout
 
-`--worktree [app=]<dir>` tests one checkout. The directory must be a Git checkout root; its committed `HEAD` is exported and started with the manifest's `runtimeOptions.services` recipe (see [Built-in runtime](#built-in-runtime)). The report states the commit and whether the checkout was clean; uncommitted changes are not tested. Name the app (`TravelTracker=<dir>`) when the manifest has more than one, or leave it off when there is one.
+`--worktree [app=]<dir>` tests one checkout. The directory must be a Git checkout root; its committed `HEAD` is exported and started with the manifest's `runtimeOptions.services` recipe (see [Built-in runtime](#built-in-runtime)). The report lists each checkout's commit and whether it was clean; uncommitted changes are not tested. Leave the app name off when the manifest has one app; otherwise name each one (`--worktree web=<dir> --worktree api=<dir>`).
 
 `--login <userVar>,<passVar>` names the two environment variables that hold the username and password (never the values). It overrides the manifest's `login` and works with both `--worktree` and `--url`.
 
-To compare a change with its base, run the same ticket twice, once on each directory, and read the two reports. The checks don't change between runs.
+The runtime is chosen in this order: `--runtime <path>`, `PROOFS_RUNTIME`, `.proofs-runtime/runtime.mjs`, then the built-in runtime. `--plan` prints which one.
 
 ## Test a running environment
 
-Pass `--url` and the harness starts nothing, pins nothing and needs no runtime or Docker. It runs the ticket's checks against the origins you give and reports one result per AC.
+Pass `--url` and the harness starts nothing and needs no runtime or Docker. It runs the checks against the origins you give and reports one result per AC.
 
 ```bash
 node proofs/run.mjs TEAM-42 --url https://dev.example.com
@@ -54,12 +65,11 @@ node proofs/run.mjs TEAM-42 --url web=https://dev.example.com --url api=https://
 - `--url [name=]<origin>` is repeatable. An origin is `http(s)://host[:port]`, with no path, query or credentials. A bare origin is named `app` and reaches the checks as `PROOF_APP_URL`; `web=...` becomes `PROOF_WEB_URL`. Checks reference these names, so a ticket's checks work against any environment.
 - `--context key=value` becomes `PROOF_CONTEXT_<KEY>` (for example a tenant or client slug).
 - `--branch <name>` is a label printed in the report for the branch the environment is expected to serve. It is not verified; the harness cannot see what a remote environment deployed.
-- **Logins** are never values in a flag or manifest. Either set `PROOF_USERNAME` and `PROOF_PASSWORD` (browser checks), or add a top-level `"login": { "usernameEnv": "APP_DEV_USER", "passwordEnv": "APP_DEV_PASS" }` to the manifest naming the variables that hold them. For API folders with `"auth": "runtime"`, set `PROOF_API_HEADERS` (a JSON map from URL name to `authorization` or `cookie` headers).
+- **Logins** are never values in a flag or manifest. Either set `PROOF_USERNAME` and `PROOF_PASSWORD` (browser checks), or use `--login` or a top-level `"login": { "usernameEnv": "APP_DEV_USER", "passwordEnv": "APP_DEV_PASS" }` in the manifest to name the variables that hold them. For API folders with `"auth": "runtime"`, set `PROOF_API_HEADERS` (a JSON map from URL name to `authorization` or `cookie` headers).
 - The variables come from your environment, then from `<workspace>/.env`. The file is plain `KEY=VALUE` lines (quotes allowed, no expansion) and the real environment wins. Only the variables the harness looks up are used, and values never appear in reports or output.
 - TLS is verified. For a private CA set `NODE_EXTRA_CA_CERTS=<absolute path>`. `--insecure-tls` skips certificate checks (for example a local mkcert setup); use it only on environments you control.
-- The manifest needs only `acs`. `apps` is ignored.
 - The adapters can reach only the origins you listed. **Checks that create or change data change that environment**, so write checks that are safe for where you point them, and never aim a write check at production.
-- The report has no Before column (`Not run — target verification`) and says no revision was pinned: it describes what the environment served during the run.
+- The report says no revision was pinned: it describes what the environment served during the run.
 
 ## Write a ticket's proofs
 
@@ -76,28 +86,21 @@ A ticket's folder lives in this repo's own `.proofs/` (ignored by Git; reports g
 ```json
 {
   "acs": [{ "id": "AC1", "claim": "The confirmation shows the saved item name." }],
-  "apps": {
-    "catalog": {
-      "repo": "catalog",
-      "before": "<baseline commit>",
-      "after": "<candidate commit>",
-      "mergedRef": "refs/heads/main"
-    }
-  },
+  "login": { "usernameEnv": "APP_USER", "passwordEnv": "APP_PASS" },
+  "runtimeOptions": { "services": { "app": { "app": "catalog", "start": "node server.js" } } },
   "csv": ["fixtures/items.csv"]
 }
 ```
 
-- **Apps** (local comparison only; ignored with `--url`): list every repository in the stack, even unchanged ones (pin them to the same commit on both sides). Use full SHAs. Paths are relative to the workspace unless absolute.
-- **Worktree (optional):** a clean linked worktree of that repo whose HEAD matches `after`. Never install, switch branches, stash or reset an application checkout for a proof.
-- **`mergedRef`:** an exact local `refs/heads/...` branch, used by `--post-merge`. The runner does not fetch or check that a squash or rebase contains the change.
-- **`csv`:** optional regular CSV files inside the ticket directory with distinct names. Staged read-only.
-- **`runtimeOptions`:** non-secret settings for the runtime. The built-in runtime reads its services from here.
+- **`acs`:** required. The only other fields are optional.
+- **`login`:** the names of the environment variables that hold the login (see above).
+- **`runtimeOptions`:** non-secret settings for the runtime, used by `--worktree`. The built-in runtime reads its services from here. Not used with `--url`.
+- **`csv`:** regular CSV files inside the ticket directory with distinct names. Staged read-only.
 - Never put credentials or customer data in a manifest, check or CSV.
 
 ## Built-in runtime
 
-For most projects nothing needs writing: list the services in the manifest and the harness starts each one from its pinned commit as a local process. Example (`examples/built-in-demo.mjs` runs this end to end):
+For most projects nothing needs writing: list the services in the manifest and `--worktree` starts each one from the checkout's committed `HEAD` as a local process (`examples/built-in-demo.mjs` runs this end to end):
 
 ```json
 "runtimeOptions": {
@@ -110,64 +113,50 @@ For most projects nothing needs writing: list the services in the manifest and t
     }
   },
   "passEnv": ["DB_PASSWORD"],
-  "login": { "usernameEnv": "PROOF_LOGIN_USER", "passwordEnv": "PROOF_LOGIN_PASS" },
   "context": { "tenant": "demo" },
   "teardown": []
 }
 ```
 
-Per side, for each service in order, it:
+For each service in order, it:
 
-1. exports the pinned commit with `git archive` into the side's directory (committed files only);
+1. exports the checkout's commit with `git archive` into the run's directory (committed files only);
 2. symlinks each `link` path (for example `node_modules`) from the repository checkout;
 3. runs the `setup` commands, then `start`, with `PORT` (a free loopback port), `HOST` and your `env` entries;
 4. polls `ready` (default `/`, up to `readySeconds`, default 120) until the server answers below HTTP 500.
 
 It returns `PROOF_<SERVICE>_URL` for each service, so name a service `app` to get `PROOF_APP_URL`. On close it stops every process and runs `teardown`.
 
-- `app` names the manifest app whose commit the service runs (default: the service name). Several services can run the same app.
-- Placeholders in `setup`, `start`, `env` and `teardown`: `{port}`, `{dir}` (the side's directory), `{src}` (the exported tree), `{id}`, `{slug}` (the id as a safe identifier, unique per run and side; use it for scratch database names) and `{url:<service>}` (an earlier service's URL).
+- `app` names the `--worktree` app whose commit the service runs (default: the service name). Several services can run the same app.
+- Placeholders in `setup`, `start`, `env` and `teardown`: `{port}`, `{dir}` (the run's directory), `{src}` (the exported tree), `{id}`, `{slug}` (the id as a safe identifier, unique per run; use it for scratch database names) and `{url:<service>}` (an earlier service's URL).
 - Services get only `PATH`, `HOME`, `LANG`, `LC_ALL`, the variables named in `passEnv`, and their own `env`. Secrets stay in your shell; the manifest holds names only.
-- `login` (also valid at the manifest's top level, where it serves both modes) names the environment variables that hold the username and password, and hands them to the browser checks as `PROOF_USERNAME` and `PROOF_PASSWORD`. They are read from your environment, then `<workspace>/.env`.
-- `context` becomes `PROOF_CONTEXT_<KEY>`. Command output goes to `service.log` in the side's directory.
+- `login` (top level or under `runtimeOptions`) hands the browser checks `PROOF_USERNAME` and `PROOF_PASSWORD`, read from your environment, then `<workspace>/.env`.
+- `context` becomes `PROOF_CONTEXT_<KEY>`. Command output goes to `service.log` in the run's directory.
 - Commands run as you through `sh -c`, so review a manifest as you would a script.
 
 ## Write a custom runtime
 
-When a project needs more than commands (a database snapshot, a container stack), supply a trusted local ESM module with `--runtime`, `PROOFS_RUNTIME` or `.proofs-runtime/runtime.mjs`. A manifest never selects code. See `examples/demo-runtime.mjs`. It exports:
+When a project needs more than commands (a database snapshot, a container stack), supply a trusted local ESM module with `--runtime`, `PROOFS_RUNTIME` or `.proofs-runtime/runtime.mjs`. A manifest never selects code. It exports:
 
 | Hook | Contract |
 | --- | --- |
 | `captureDataset({ dir, workspace, options, signal })` | Optional. Snapshot an approved synthetic source once per run into `dir`; return the handle `startSandbox` needs. |
-| `startSandbox({ id, dir, workspace, commits, dataset, options, signal })` | Required. Start the exact `{ repo, sha }` pins in `commits` (keyed by app) with writable state in this side's `dir`. Return `{ env, close }`; `close()` tears down only this side. Roll back on error and honor `signal`. |
+| `startSandbox({ id, dir, workspace, commits, dataset, options, env, signal })` | Required, called once per run. Start the `{ repo, sha }` pins in `commits` (keyed by app; it holds only the `--worktree` pins) with writable state in `dir`. `options` is the manifest's `runtimeOptions` and `env` the operator's environment. Return `{ env, close }`; `close()` tears the sandbox down. Roll back on error and honor `signal`. |
 
-`env` must contain at least one `PROOF_<NAME>_URL`: an HTTP(S) **origin** on loopback, with no path, query, credentials or fragment, on a distinct port per side. Optional values:
+`env` must contain at least one `PROOF_<NAME>_URL`: an HTTP(S) **origin** on loopback, with no path, query, credentials or fragment. Optional values:
 
 - `PROOF_CONTEXT_<NAME>`: non-secret context for checks.
 - `PROOF_USERNAME` / `PROOF_PASSWORD`: browser login.
 - `PROOF_API_HEADERS`: per-origin `authorization` or `cookie` headers for API folders with `"auth": "runtime"`.
-- `NODE_EXTRA_CA_CERTS`: a CA file inside the side's directory, for private HTTPS. The browser ignores local certificate errors, so it does not verify TLS trust.
+- `NODE_EXTRA_CA_CERTS`: a CA file inside the sandbox directory, for private HTTPS. The browser ignores local certificate errors, so it does not verify TLS trust.
 
 **Trust boundary:** the runtime and the authored browser steps run as your OS user. Review them first; this is not a sandbox. The harness restricts the adapters' HTTP destinations and the environment it passes them. Your runtime must keep its listeners and state private and run the pinned code. Never point a proof at production, shared dev or a customer system, and don't reuse ordinary app credentials. If you can't isolate it, block the run.
 
 ## How a run works
 
-`--plan` resolves pins and the proof-input digest without importing the runtime or writing output. A live run freezes the checks, ACs and CSVs, then starts Before and After separately. BDD and API checks on the same side share that side's state, so use separate records or restore what you change. Each adapter has a five-minute limit after startup.
+`--plan` resolves the target, the checkout commits and the proof-input digest without importing the runtime or writing output. A live run freezes the checks, ACs and CSVs, starts the target once (a sandbox for `--worktree`, nothing for `--url`), then runs the BDD and API adapters in turn. They share that run's state, so use separate records or restore what you change. Each adapter has a five-minute limit after startup.
 
-After merge, run `--post-merge` with the original checks. It resolves only each app's `mergedRef` and fills Before with `Not run — post-merge verification`. Compare the `Proof inputs digest` with the pre-merge plan: it covers checks, ACs and CSVs, **not** runtime code, app pins or the dataset, so record those differences separately.
-
-## Try the example
-
-Linux, Node.js 22+ and Git:
-
-```bash
-npm --prefix api ci
-npm --prefix bdd ci
-npm --prefix bdd exec -- playwright install chromium
-node examples/built-in-demo.mjs
-```
-
-It builds a tiny local app at two commits and runs real browser and API checks both ways: the built-in runtime comparing Before and After, then `--url` against the After build served on this machine's network address. No Docker, database or login. `examples/demo.mjs` is a second demo that adds a custom runtime (`demo-runtime.mjs`), `--plan` digests and post-merge verification.
+To compare a base and a feature, run the same ticket on each checkout and compare the `Proof inputs digest` in the two reports: it covers checks, ACs and CSVs, **not** runtime code, checkout commits or the dataset, so record those differences separately.
 
 ## License
 

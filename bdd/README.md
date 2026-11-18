@@ -1,8 +1,8 @@
 # Browser BDD proofs
 
-Follow the [proof runbook](../README.md) first. Put browser checks under `<workspace>/.proofs/<ID>/bdd/`. Use this surface when an acceptance criterion (AC) depends on something a person can see or do in the browser. An API response alone does not prove a label, a rendered state, navigation, or a browser interaction.
+Follow the [proof runbook](../README.md) first. Put browser checks under `.proofs/<ID>/bdd/` in the harness repo (or a workspace-level `.proofs/`). Use this surface when an acceptance criterion (AC) depends on something a person can see or do in the browser. An API response alone does not prove a label, a rendered state, navigation, or a browser interaction.
 
-Keep the manifest, features, steps, and synthetic CSVs in the workspace's [ignored proof directory](../README.md#set-up-a-project), not in the shared harness. Reuse those inputs for post-merge verification. Another checkout or machine needs a private handoff of the same inputs, without credentials or customer data.
+Keep the manifest, features, steps, and synthetic CSVs in the harness's [ignored `.proofs/` directory](../README.md#write-a-tickets-proofs), not in a shared repo. Another checkout or machine needs a private handoff of the same inputs, without credentials or customer data.
 
 ## Set up the proof tools
 
@@ -26,7 +26,7 @@ The runner does not install dependencies during a proof. If you install Chromium
 1. Identify the manifest AC ID, the local role, and the approved starting fixture. Use `Given`, `When`, and `Then` to separate setup, the action, and the observable result.
 2. Select an origin from the runtime, such as `process.env.PROOF_APP_URL`, and construct an absolute URL, e.g. `new URL('/inventory', process.env.PROOF_APP_URL).href`. There is no implicit default origin. The adapter starts a fresh browser context for each scenario and permits only the configured run-owned origins. Use `page` for browser interactions. Use `proof.fetch(absoluteUrl, options)` for local setup: it shares that context's cookies and never follows redirects. Do not call Node HTTP or `page.request` directly. Use the API adapter for HTTP assertions that do not need a browser.
 3. Prefer selectors based on visible labels, roles, and names. Wait for the UI outcome instead of adding a fixed sleep. Check the visible state before and after the action if the difference is what proves the claim.
-4. Use the same assertion, route, role, action, and logical fixture on both sides. Do not assert on source code, browser console text, or a screenshot alone when the AC is about what the user sees.
+4. Use the same assertion, route, role, action, and logical fixture on every target, so the same check can run against a base checkout, a feature checkout and a running environment. Do not assert on source code, browser console text, or a screenshot alone when the AC is about what the user sees.
 5. Record the observed visible result for the AC. If a prerequisite failed, record a blocker instead of interpreting the login page, a missing fixture, or a connection error as a product failure.
 
 Example scenario for a fictional AC. Implement all three steps for your actual local flow.
@@ -60,12 +60,13 @@ The adapter does not retain screenshots, traces, video, or raw logs. Record evid
 
 ## Run
 
-Run the complete proof using the [plan and execute commands](../README.md#run-and-read-the-report), with `$HARNESS`, `$WORKSPACE`, and `$RUNTIME` pointing to the harness checkout, workspace, and trusted runtime module:
+Run the proof against one target using the [run commands](../README.md#run-a-ticket). `--only bdd` runs just this adapter:
 
 ```bash
-node "$HARNESS/run.mjs" TEAM-42 --workspace "$WORKSPACE" --runtime "$RUNTIME"
+node "$HARNESS/run.mjs" TEAM-42 --worktree "$CHECKOUT" --only bdd      # a local checkout, started by the runtime
+node "$HARNESS/run.mjs" TEAM-42 --url https://dev.example.com --only bdd   # a running environment
 ```
 
-Do not count browser startup failure or missing evidence as a product failure. For [post-merge verification](../README.md#verify-after-merge), append `--post-merge` and use the same features and steps. Before is intentionally not run.
+To compare a change with its base, run the same ticket once on each checkout and read the two reports. Do not count browser startup failure or missing evidence as a product failure.
 
 Run `node --test bdd/selftest.mjs` from the harness root to verify the adapter against fake loopback services. The test uses `openssl` for a disposable certificate and the installed Chromium browser.

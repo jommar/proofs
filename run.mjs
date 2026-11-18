@@ -307,15 +307,13 @@ export async function run(args, {
       await rm(scratch, { recursive: true, force: true });
     }
   } catch {
-    phases.after.issues.push('Private run files could not be removed; check the run directory.');
+    phases.run.issues.push('Private run files could not be removed; check the run directory.');
   }
   if (input.check) {
     // A readiness check leaves no report: it only says whether each side could start.
     await rm(runDir, { recursive: true, force: true });
-    const label = { before: 'Before', after: input.target ? 'Target' : 'After' };
-    const lines = Object.entries(phases).map(([side, { issues }]) => issues.length
-      ? `${label[side]}: NOT READY — ${issues.join(' ')}` : `${label[side]}: ready`);
-    return { exitCode: Object.values(phases).some(({ issues }) => issues.length) ? 1 : 0, check: lines.join('\n') };
+    const { issues } = phases.run;
+    return { exitCode: issues.length ? 1 : 0, check: issues.length ? `NOT READY — ${issues.join(' ')}` : 'ready' };
   }
   const { report, exitCode } = makeReport(input, id, phases);
   const reportPath = join(runDir, 'report.md');
