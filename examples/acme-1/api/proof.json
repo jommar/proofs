@@ -1,0 +1,9 @@
+{
+  "folders": [
+    {
+      "path": "cases",
+      "auth": "none",
+      "requests": { "availability.bru": { "ac": "AC2" } }
+    }
+  ]
+}

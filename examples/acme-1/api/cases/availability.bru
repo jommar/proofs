@@ -1,0 +1,16 @@
+meta {
+  name: Stocked item is available
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{PROOF_APP_URL}}/api/item
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+  res.body.available: eq true
+}

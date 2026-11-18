@@ -1,0 +1,11 @@
+{
+  "name": "proofs-api",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test run.test.mjs" },
+  "dependencies": {
+    "@usebruno/lang": "0.36.0",
+    "csv-parse": "5.6.0"
+  }
+}
