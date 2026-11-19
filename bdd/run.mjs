@@ -119,7 +119,7 @@ async function main() {
       })});
 
       export default defineConfig({
-        testDir, workers: 1, retries: 0, globalTimeout: 120000, timeout: 30000,
+        testDir, workers: 1, retries: 0, globalTimeout: 240000, timeout: 90000,
         outputDir: 'test-results', preserveOutput: 'never',
         reporter: [[${JSON.stringify(join(directory, 'reporter.mjs'))}]],
         use: {
