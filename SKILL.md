@@ -46,11 +46,31 @@ Targets and flags:
 - `--login <userVar>,<passVar>`: names the environment variables holding the login, never the values. They are read from the shell, then `<workspace>/.env`. Never print them.
 - `--only bdd|api` limits adapters. `--runtime <file>` uses a custom runtime.
 
+## Compare a feature branch with its base
+
+There is no Before/After mode: a run tests one target, so a comparison is two runs of the same checks.
+
+1. **Pick the base.** The branch the feature was cut from, as a checkout whose `HEAD` is an ancestor of the feature's (`git merge-base --is-ancestor <base> <feature>`). If the base is a primary checkout you must not disturb, that is fine: only its committed `HEAD` is exported.
+2. **Run both with identical inputs:** `node proofs/run.mjs <ID> --worktree <feature-dir> --login ...`, then the same command with `--worktree <base-dir>`. Same ID, same flags, same per-run settings, same check files (the "Proof inputs digest" line in each report must match). Run them one after another.
+3. **Confirm what was tested.** Each report lists the commit under "Revisions", and says "clean checkout" or that uncommitted changes were not tested. Commit the feature first if it is dirty.
+4. **Consolidate** into one table, one row per AC: `AC | Base | Feature | Verdict`.
+
+| Base | Feature | Verdict |
+| --- | --- | --- |
+| Fail | Pass | The change delivers the AC. This is the proof. |
+| Pass | Pass | Holds, but the check does not distinguish the change (the base already behaved this way). Say so. |
+| Fail | Fail | The feature does not meet the AC. |
+| Pass | Fail | Regression. |
+| Blocked on either side | | Not comparable; fix the environment or fixture and rerun. |
+
+For an AC that depends on a per-run setting, run both sides for each setting value.
+Against a running environment (`--url`) there is no base: test the deployed build, and use `--branch <label>` only to name it in the report.
+
 ## Step 4: report
 
 Report each AC as **Pass**, **Fail**, **Blocked** (a fixture, login or response was missing: not a product failure) or
 **Uncovered** (no check). State which ACs have no checks; never call a ticket proven on partial coverage. A report
-is evidence only for the run that produced it. For a base-versus-feature comparison, put both results side by side.
+is evidence only for the run that produced it. For a base-versus-feature comparison, use the table in the previous section.
 
 ## Gotchas
 
