@@ -92,6 +92,16 @@ Report each AC as **Pass**, **Fail**, **Blocked** (a fixture, login or response 
 **Uncovered** (no check). State which ACs have no checks; never call a ticket proven on partial coverage. A report
 is evidence only for the run that produced it. For a base-versus-feature comparison, use the table in the previous section.
 
+## Use subagents to go faster
+
+If your agent runtime has subagents, split the independent work and keep the judgment in the main session.
+
+- **Step 1 (read the ticket):** one subagent reads a long ticket, its comments and linked PR text and returns the ACs verbatim plus any comment that changes one. The main session writes `manifest.json` (it is the only writer of that file).
+- **Step 2 (write checks):** one subagent per AC or per adapter (`bdd/` vs `api/`), each writing only its own files (`bdd/features/ac3.feature` and its steps file, never a shared one). Give each the AC text, the target and how to read the app's behavior. The main session reviews every check against the AC's claim before any run.
+- **Step 3 (run):** the main session runs the proofs. Base and feature runs can go in parallel only when they share nothing (for example two `--url` targets); runs that share a scratch resource such as a database name must stay sequential. Do not hand a full run to a subagent to debug open-endedly.
+- **Bound every subagent:** tell it to stop and report after two failed fix attempts or 15 minutes, to report names, counts and paths only (no credentials, no customer data), and not to start long-lived services without stopping them.
+- **Verify, don't trust:** read the report yourself; a subagent's "all pass" is a claim, not evidence.
+
 ## Gotchas
 
 - Runs that share a scratch resource (for example one database name per ticket) must run one after another.
