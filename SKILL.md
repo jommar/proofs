@@ -63,6 +63,26 @@ There is no Before/After mode: a run tests one target, so a comparison is two ru
 | Pass | Fail | Regression. |
 | Blocked on either side | | Not comparable; fix the environment or fixture and rerun. |
 
+Example (ticket `TEAM-42`, feature in `~/work/app-feature`, base in `~/work/app-base`):
+
+```bash
+git -C ~/work/app-feature merge-base --is-ancestor "$(git -C ~/work/app-base rev-parse HEAD)" HEAD && echo base-ok
+node proofs/run.mjs TEAM-42 --worktree ~/work/app-feature --login APP_USER,APP_PASS   # report A
+node proofs/run.mjs TEAM-42 --worktree ~/work/app-base    --login APP_USER,APP_PASS   # report B
+```
+
+Read the Result column of each `.proofs-out/TEAM-42/<run-id>/report.md` and write:
+
+| AC | Base | Feature | Verdict |
+| --- | --- | --- | --- |
+| AC1 saved name shown | Fail | Pass | Change delivers it |
+| AC2 empty name rejected | Pass | Pass | Holds; base already did this |
+| AC3 export has the new column | Blocked (login) | Pass | Not comparable; fix the base login, rerun it |
+| AC4 audit entry written | Uncovered | Uncovered | No check; write one or flag it |
+
+Example prompts that should work: `Test TEAM-42 on proofs against ~/work/app-feature and ~/work/app-base and consolidate.`
+`Test TEAM-42 on proofs against https://dev.example.com with tenant dummy.` `Write proofs for TEAM-42 from its ACs, don't run them yet.`
+
 For an AC that depends on a per-run setting, run both sides for each setting value.
 Against a running environment (`--url`) there is no base: test the deployed build, and use `--branch <label>` only to name it in the report.
 
