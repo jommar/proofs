@@ -72,7 +72,7 @@ Targets and flags:
 There is no Before/After mode: a run tests one target, so a comparison is two runs of the same checks.
 
 1. **Pick the base.** The branch the feature was cut from, as a checkout whose `HEAD` is an ancestor of the feature's (`git merge-base --is-ancestor <base> <feature>`). If the base is a primary checkout you must not disturb, that is fine: only its committed `HEAD` is exported.
-2. **Run both with identical inputs:** `node proofs/run.mjs <ID> --worktree <feature-dir> --login ...`, then the same command with `--worktree <base-dir>`. Same ID, same flags, same per-run settings, same check files (the "Proof inputs digest" line in each report must match). Run them one after another.
+2. **Run both with identical inputs:** `node proofs/run.mjs <ID> --worktree <feature-dir> --login ...`, then the same command with `--worktree <base-dir>`. Same ID, same flags, same per-run settings, same check files (the "Proof inputs digest" line in each report must match; it names the adapters it covers, so `--only` changes it and both runs need the same `--only`). Run them one after another.
 3. **Confirm what was tested.** Each report lists the commit under "Revisions", and says "clean checkout" or that uncommitted changes were not tested. Commit the feature first if it is dirty.
 4. **Consolidate** into one table, one row per AC: `AC | Base | Feature | Verdict`.
 

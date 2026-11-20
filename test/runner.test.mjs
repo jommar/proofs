@@ -455,6 +455,24 @@ test('an empty adapter folder is skipped with a warning instead of blocking ever
   assert.doesNotMatch(report, /## Run issues/);
 });
 
+test('the plan and report digests match for the same checks, and the line names the adapters it covers', async t => {
+  const { root } = await workspace(t);
+  await adapter(root);
+  await mkdir(join(ticketDir(root), 'api'));
+  const digestOf = text => text.match(/^Proof inputs digest: `sha256:([a-f0-9]{64})` \(adapters: ([a-z, ]+);/m)?.slice(1);
+  // An empty api/ is not hashed, so a plan without --only and a run with --only bdd cover the same checks.
+  const [planned, plannedAdapters] = digestOf((await execute(root, {}, [ticket, '--plan'])).plan);
+  assert.equal(plannedAdapters, 'bdd');
+  const outcome = await execute(root, fakes(), [ticket, '--only', 'bdd']);
+  assert.deepEqual(digestOf(await readFile(outcome.reportPath, 'utf8')), [planned, 'bdd']);
+  // Checks in api/ make it a different set of inputs, and the label says which.
+  await adapter(root, 'api');
+  const [both, bothAdapters] = digestOf((await execute(root, {}, [ticket, '--plan'])).plan);
+  assert.equal(bothAdapters, 'bdd, api');
+  assert.notEqual(both, planned);
+  assert.deepEqual(digestOf((await execute(root, {}, [ticket, '--plan', '--only', 'bdd'])).plan), [planned, 'bdd']);
+});
+
 test('capture, start, env validation, and cleanup errors surface separately without leaked exception text', async t => {
   const { root } = await workspace(t);
   await adapter(root);

@@ -252,7 +252,7 @@ When a project needs more than commands (a database snapshot, a container stack)
 
 `--plan` resolves the target, the checkout commits and the proof-input digest without importing the runtime or writing output. A live run freezes the checks, ACs and CSVs, starts the target once (a sandbox for `--worktree`, nothing for `--url`), then runs the BDD and API adapters in turn. They share that run's state, so use separate records or restore what you change. Each adapter has a five-minute limit after startup.
 
-To compare a base and a feature, run the same ticket on each checkout and compare the `Proof inputs digest` in the two reports: it covers checks, ACs and CSVs, **not** runtime code, checkout commits or the dataset, so record those differences separately.
+To compare a base and a feature, run the same ticket on each checkout and compare the `Proof inputs digest` in the two **reports**: it covers checks, ACs and CSVs, **not** runtime code, checkout commits or the dataset, so record those differences separately. It hashes only the adapters that run, which the line names (`adapters: bdd, api`), so `--only` changes it: give both runs the same `--only`. `--plan` prints the same value as the report for the same checks and flags; a plan without `--only` and a run with `--only bdd` differ whenever `api/` holds checks.
 
 ## Directory layout
 
