@@ -7,7 +7,7 @@ Check a finished change against its acceptance criteria (ACs). A run executes a 
 
 A tracked [target profile](#target-profiles) (`--target <name>`) names each environment once, so the same ticket runs the same way in separate sessions for local, dev, UAT and live, and `--summary` merges them into one table.
 
-Use [Gherkin + Playwright](bdd/README.md) for what a user sees and [Bruno](api/README.md) for HTTP. No ticket tracker, database or container engine is required.
+Use [Playwright](bdd/README.md) for what a user sees and [Bruno](api/README.md) for HTTP. No ticket tracker, database or container engine is required.
 
 ## Try the example
 
@@ -175,7 +175,7 @@ Every complete run is also appended to `.proofs/<ID>/ledger.json`, beside the ti
 ```text
 proofs/.proofs/TEAM-42/       # inside this repo, gitignored
   manifest.json
-  bdd/        # optional: features/ and steps/
+  bdd/        # optional: Playwright *.spec.{mjs,js,ts} files
   api/        # optional: proof.json and .bru files
   fixtures/   # optional: approved synthetic CSVs
 ```
@@ -268,12 +268,13 @@ To compare a base and a feature, run the same ticket on each checkout and compar
 | `run.mjs` | Main CLI entry point (`--worktree`, `--url`, `--target`, `--persona`, `--source`, `--plan`, `--check`, `--serve`, `--summary`, `--only`, `--ac`, `--debug`, `--help`). |
 | `lib/` | Argument parsing and offline preflight (`inputs.mjs`), target profiles and capabilities (`targets.mjs`), data sources and qualification (`sources.mjs`), input snapshot/digest (`snapshot.mjs`), origin validation (`origins.mjs`), evidence/report rendering (`evidence.mjs`), `runs.json` index (`runs.mjs`), live run progress (`progress.mjs`), durable per-ticket ledger (`ledger.mjs`), `--summary` matrix (`summary.mjs`), `--help` text (`help.mjs`), self-contained HTML dashboard (`dashboard.mjs`). |
 | `runtime/` | Built-in local process runtime (`command.mjs`) — see [`runtime/README.md`](runtime/README.md). |
-| `bdd/` | Gherkin + Playwright browser adapter (`run.mjs`, `fixtures.mjs`, `loopback.mjs`, `reporter.mjs`) — see [`bdd/README.md`](bdd/README.md). |
+| `bdd/` | Plain Playwright browser adapter (`run.mjs`, `fixtures.mjs`, `loopback.mjs`, `reporter.mjs`), see [`bdd/README.md`](bdd/README.md). |
 | `api/` | Declarative Bruno HTTP adapter (`run.mjs`) — see [`api/README.md`](api/README.md). |
 | `test/` | Harness unit/integration tests (`runner.test.mjs`, `targets.test.mjs`, `command-runtime.test.mjs`, `dashboard.test.mjs`, `progress.test.mjs`). |
 | `examples/` | Self-contained end-to-end demo (`built-in-demo.mjs`). |
 | `dashboard.mjs` | Rebuilds the offline `.proofs-out/dashboard.html` dashboard from `runs.json` and redacted `report.md` files (also auto-updated during and after each run); each run shows the command it was started with, with paths, `--context` values and URL credentials masked. |
 | `prune.mjs` | Cleans unindexed run folders from `.proofs-out/` (`--yes` to delete). |
+| `CHANGELOG.md` | Notable changes to the harness. |
 
 ## License
 

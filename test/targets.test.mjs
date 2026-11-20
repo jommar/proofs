@@ -396,7 +396,7 @@ test('--summary merges the durable ledger into an AC x target matrix with Before
   assert.doesNotMatch(summary, /Warning: Proof inputs digest differs/);
 
   // A check edited between runs is flagged: the columns are no longer like for like.
-  await writeFile(join(dir, 'bdd', 'changed.feature'), 'Feature: changed\n');
+  await writeFile(join(dir, 'bdd', 'changed.spec.mjs'), '// changed\n');
   await run([ticket, '--target', 'dev', '--context', 'tenant=demo'], { workspace: root, parentEnv: env, invoke: status({}) });
   assert.match((await run([ticket, '--summary'], { workspace: root, parentEnv: env })).summary, /Warning: Proof inputs digest differs/);
   await assert.rejects(run([ticket, '--summary', '--target', 'dev'], { workspace: root, parentEnv: env }), /takes only --workspace/);

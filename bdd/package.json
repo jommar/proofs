@@ -4,9 +4,6 @@
   "type": "module",
   "engines": { "node": ">=22" },
   "devDependencies": {
-    "@cucumber/gherkin": "39.1.0",
-    "@cucumber/messages": "32.3.1",
-    "@playwright/test": "1.57.0",
-    "playwright-bdd": "9.2.1"
+    "@playwright/test": "1.57.0"
   }
 }

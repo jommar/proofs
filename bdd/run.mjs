@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import { constants, createWriteStream } from 'node:fs';
 import { cp, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,31 +9,27 @@ import { loopbackProxy } from './loopback.mjs';
 import { acTag, blockRow } from './reporter.mjs';
 
 const directory = dirname(fileURLToPath(import.meta.url));
-const require = createRequire(import.meta.url);
+const specFile = /\.spec\.(?:[cm]?js|[cm]?ts)$/;
+const acTagGlobal = /@AC[1-9]\d*(?!\d)/g;
 
-function parsedTags(source, path) {
-  try {
-    const { generateMessages } = require('@cucumber/gherkin');
-    const { IdGenerator, SourceMediaType } = require('@cucumber/messages');
-    const messages = generateMessages(source, path, SourceMediaType.TEXT_X_CUCUMBER_GHERKIN_PLAIN, {
-      includePickles: true, newId: IdGenerator.incrementing(),
-    });
-    if (!messages.some(message => message.parseError)) {
-      return messages.flatMap(message => message.pickle?.tags.map(tag => tag.name) ?? []);
-    }
-  } catch { /* a missing parser or invalid feature can only block */ }
-  // Discover blocked AC IDs if the parser is unavailable. Ignore doc strings.
-  let fence;
+function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\/|(^|[^:\\])\/\/.*$/gm, '$1');
+}
+
+function parsedTags(source) {
+  const clean = stripComments(source);
   const tags = [];
-  for (const raw of source.split('\n')) {
-    const line = raw.trim();
-    if (fence) {
-      if (line === fence) fence = undefined;
-    } else if (line.startsWith('"""') || line.startsWith('```')) {
-      fence = line.slice(0, 3);
-    } else if (line.startsWith('@')) {
-      tags.push(...line.split(/\s+/));
+  // Match Playwright { tag: '@AC1' } or { tag: ['@AC1', '@AC2'] } options.
+  for (const match of clean.matchAll(/\btag\s*:\s*(?:(['"`])(@AC[1-9]\d*)\1|\[([^\]]*)\])/g)) {
+    if (match[2]) {
+      tags.push(match[2]);
+    } else if (match[3]) {
+      for (const item of match[3].matchAll(/(['"`])(@AC[1-9]\d*)\1/g)) tags.push(item[2]);
     }
+  }
+  // Match Playwright inline tags inside test(...) or test.describe(...) titles.
+  for (const match of clean.matchAll(/\btest(?:\.(?:describe|only|skip|fixme|fail))*\(\s*(['"`])([^'"`]*)\1/g)) {
+    for (const token of match[2].match(acTagGlobal) ?? []) tags.push(token);
   }
   return tags;
 }
@@ -45,9 +40,10 @@ async function taggedCriteria(dir) {
     for (const entry of await readdir(path, { withFileTypes: true })) {
       const source = join(path, entry.name);
       if (entry.isDirectory()) await walk(source);
-      if (!entry.isFile() || !entry.name.endsWith('.feature')) continue;
-      const tags = parsedTags(await readFile(source, 'utf8'), source);
-      for (const tag of tags) if (acTag.test(tag)) found.add(tag.slice(1));
+      if (!entry.isFile() || !specFile.test(entry.name)) continue;
+      for (const tag of parsedTags(await readFile(source, 'utf8'))) {
+        if (acTag.test(tag)) found.add(tag.slice(1));
+      }
     }
   }
   await walk(dir);
@@ -93,8 +89,7 @@ async function main() {
     }
   }
   const debug = process.env.PROOF_DEBUG === '1' && Boolean(diagDir);
-  const features = join(ticket, 'features');
-  const allAcs = await taggedCriteria(features);
+  const allAcs = await taggedCriteria(ticket);
   if (!allAcs.size) throw new Error('No tagged acceptance criteria');
   const selectedAcs = process.env.PROOF_ACS ? new Set(process.env.PROOF_ACS.split(',').filter(Boolean)) : null;
   const acs = selectedAcs ? new Set([...allAcs].filter(ac => selectedAcs.has(ac))) : allAcs;
@@ -135,22 +130,16 @@ async function main() {
       ...(diagDir ? { PROOF_DIAGNOSTICS_DIR: diagDir } : {}),
       ...(debug ? { PROOF_DEBUG: '1' } : {}),
     });
-    // Test configuration and generated specs never live in an authoring directory.
+    // Test configuration never lives in an authoring directory.
+    const grepPattern = `@(?:${[...acs].join('|')})(?!\\d)`;
     await writeFile(join(scratch, 'playwright.config.mjs'), `
       import { defineConfig } from '@playwright/test';
-      import { defineBddConfig } from 'playwright-bdd';
-
-      const testDir = defineBddConfig(${JSON.stringify({
-        features: join(features, '**/*.feature'), featuresRoot: features,
-        steps: join(ticket, 'steps', '**/*.{js,mjs,ts}'),
-        importTestFrom: join(directory, 'fixtures.mjs'),
-        outputDir: '.features-gen',
-        tags: [...acs].map(ac => `@${ac}`).join(' or '),
-        missingSteps: 'fail-on-run',
-      })});
 
       export default defineConfig({
-        testDir, workers: 1, retries: 0, globalTimeout: 270000, timeout: 90000,
+        testDir: ${JSON.stringify(ticket)},
+        testMatch: /.*\\.spec\\.(?:[cm]?js|[cm]?ts)$/,
+        grep: new RegExp(${JSON.stringify(grepPattern)}),
+        workers: 1, retries: 0, globalTimeout: 270000, timeout: 90000,
         outputDir: 'test-results', preserveOutput: ${JSON.stringify(debug ? 'failures-only' : 'never')},
         reporter: [[${JSON.stringify(join(directory, 'reporter.mjs'))}]],
         use: {
@@ -164,22 +153,20 @@ async function main() {
         },
       });
     `, { mode: 0o600 });
-    reason = 'bdd_generation_failed';
-    if (await cli('bddgen', [], scratch, env, diagDir ? join(diagDir, 'bddgen.log') : undefined) === 0) {
-      const code = await cli('playwright', ['test'], scratch, env, diagDir ? join(diagDir, 'playwright.log') : undefined);
-      reason = code === 0 ? 'scenario_not_run' : 'bdd_execution_failed';
-      if (debug) {
-        const pwResults = join(scratch, 'test-results');
-        const entries = await readdir(pwResults).catch(() => []);
-        if (entries.length) await cp(pwResults, join(diagDir, 'playwright'), { recursive: true }).catch(() => {});
-      }
-      const evidence = JSON.parse(await readFile(env.PROOF_BDD_EVIDENCE, 'utf8'));
-      const complete = evidence.complete && (code === 0 ? evidence.status === 'passed' : evidence.status === 'failed');
-      const incompleteAcs = new Set(evidence.rows.filter(row => row.status !== 'pass').map(row => row.ac));
-      for (const row of evidence.rows) {
-        const invalidate = !complete && row.status === 'pass' && (evidence.status !== 'timedout' || incompleteAcs.has(row.ac));
-        rows.push(invalidate ? { ac: row.ac, ...blockRow('bdd_execution_incomplete') } : row);
-      }
+    reason = 'bdd_execution_failed';
+    const code = await cli('playwright', ['test'], scratch, env, diagDir ? join(diagDir, 'playwright.log') : undefined);
+    reason = code === 0 ? 'scenario_not_run' : 'bdd_execution_failed';
+    if (debug) {
+      const pwResults = join(scratch, 'test-results');
+      const entries = await readdir(pwResults).catch(() => []);
+      if (entries.length) await cp(pwResults, join(diagDir, 'playwright'), { recursive: true }).catch(() => {});
+    }
+    const evidence = JSON.parse(await readFile(env.PROOF_BDD_EVIDENCE, 'utf8'));
+    const complete = evidence.complete && (code === 0 ? evidence.status === 'passed' : evidence.status === 'failed');
+    const incompleteAcs = new Set(evidence.rows.filter(row => row.status !== 'pass').map(row => row.ac));
+    for (const row of evidence.rows) {
+      const invalidate = !complete && row.status === 'pass' && (evidence.status !== 'timedout' || incompleteAcs.has(row.ac));
+      rows.push(invalidate ? { ac: row.ac, ...blockRow('bdd_execution_incomplete') } : row);
     }
   } catch {
     // Never write a child error message; append a safe stage code below.

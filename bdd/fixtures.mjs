@@ -1,4 +1,4 @@
-import { createBdd, test as bddTest } from 'playwright-bdd';
+import { expect, test as base } from '@playwright/test';
 import { proofUrlKey } from '../lib/origins.mjs';
 import { proxyFailureHeader } from './loopback.mjs';
 import { safeFacts, safeReason } from './reporter.mjs';
@@ -9,7 +9,8 @@ function record(info, status, observed) {
   info.annotations.push({ type: 'proof-evidence', description: JSON.stringify({ status, observed }) });
 }
 
-export const test = bddTest.extend({
+export { expect };
+export const test = base.extend({
   _localNavigation: [async ({ context }, use, info) => {
     const checkOrigin = (request, location) => {
       try {
@@ -69,5 +70,3 @@ export const test = bddTest.extend({
     await use(proof);
   },
 });
-
-export const { Given, When, Then, Before, After } = createBdd(test);

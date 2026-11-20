@@ -164,8 +164,7 @@ test('one capture and one run: allowlisted env, scoped credentials, private CSVs
   await save();
   const bddDir = await adapter(root);
   const apiDir = await adapter(root, 'api');
-  await mkdir(join(bddDir, 'features'));
-  await writeFile(join(bddDir, 'features', 'check.feature'), 'pinned browser check');
+  await writeFile(join(bddDir, 'check.spec.mjs'), 'pinned browser check');
   await writeFile(join(apiDir, 'proof.json'), 'pinned API check');
   const getDigest = text => text.match(/^Proof inputs digest: `sha256:([a-f0-9]{64})`/m)?.[1];
   const args = [ticket, ...feature, '--worktree', 'service-v2=service-v2'];
@@ -194,7 +193,7 @@ test('one capture and one run: allowlisted env, scoped credentials, private CSVs
     deps.events.push(`${name}-${env.PROOF_SIDE}`);
     assert.equal(entry, fileURLToPath(new URL(`../${name}/run.mjs`, import.meta.url)));
     assert.equal(stagedDir, join(cwd, 'proofs', name, ticket));
-    const inputFile = join(stagedDir, name === 'bdd' ? 'features/check.feature' : 'proof.json');
+    const inputFile = join(stagedDir, name === 'bdd' ? 'check.spec.mjs' : 'proof.json');
     // The api adapter runs after the browser adapter edited the sources below, yet still sees the frozen copy.
     assert.equal(await readFile(inputFile, 'utf8'), name === 'bdd' ? 'pinned browser check' : 'pinned API check');
     assert.equal((await stat(inputFile)).mode & 0o777, 0o400);
@@ -218,7 +217,7 @@ test('one capture and one run: allowlisted env, scoped credentials, private CSVs
     assert.equal((await stat(fixture)).mode & 0o777, 0o400);
     assert.equal(await readFile(fixture, 'utf8'), 'private-csv-record');
     if (name === 'bdd') {
-      await writeFile(join(bddDir, 'features', 'check.feature'), 'changed browser check');
+      await writeFile(join(bddDir, 'check.spec.mjs'), 'changed browser check');
       await writeFile(join(apiDir, 'proof.json'), 'changed API check');
       await writeFile(join(ticketDir(root), 'examples', 'fixture.csv'), 'source changed');
     }

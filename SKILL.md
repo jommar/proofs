@@ -31,8 +31,8 @@ data from the source database, declare it in `sourceRequires` (a read-only probe
 
 ## Step 2: write the checks
 
-In `.proofs/<ID>/` (gitignored): `bdd/` Gherkin features and steps for what a user sees in a browser, `api/` Bruno
-requests for HTTP behavior, `fixtures/` synthetic CSVs. Tag each scenario with its AC (`@AC1`). When a
+In `.proofs/<ID>/` (gitignored): `bdd/` Playwright specs (`*.spec.{mjs,js,ts}`) for what a user sees in a browser, `api/` Bruno
+requests for HTTP behavior, `fixtures/` synthetic CSVs. Tag each test with its AC (`{ tag: '@AC1' }`). When a
 precondition is missing, block instead of failing: `proof.block('reason')`, where the reason is lowercase letters,
 digits and underscores, at most 48 characters, with no credential text (anything else is shown as
 `unmet_prerequisite`). For `--worktree` runs, add `runtimeOptions.services` to the manifest (see "Built-in runtime"
@@ -70,7 +70,7 @@ Targets and flags:
 - `--only bdd|api` limits adapters. An empty `bdd/` or `api/` folder is skipped with a `Warning:` (its ACs stay Uncovered), so `--only` is not needed to step around it. `--runtime <file>` uses a custom runtime.
 - `--serve` keeps a local `--worktree` sandbox running until `Ctrl-C` and prints the matching `--url` iterate command so you can fix and re-run checks without restarting services.
 - `--ac AC1,AC3` runs only the listed ACs and marks unselected ACs as `Skipped — filtered out by --ac` (partial run; never treat as full ticket proof).
-- `--debug` retains private `0o600` diagnostics (`<run-dir>/diagnostics/`: `service.log`, `bddgen.log`, `playwright.log`, `bdd-failures.json`, `api.log`, and Playwright failure traces/screenshots) even on a passing run. Any failing or blocked run (including a failed `--check`) automatically retains non-empty diagnostics there while keeping `report.md` strictly redacted.
+- `--debug` retains private `0o600` diagnostics (`<run-dir>/diagnostics/`: `service.log`, `playwright.log`, `bdd-failures.json`, `api.log`, and Playwright failure traces/screenshots) even on a passing run. Any failing or blocked run (including a failed `--check`) automatically retains non-empty diagnostics there while keeping `report.md` strictly redacted.
 
 ## Compare a feature branch with its base
 
@@ -129,7 +129,7 @@ breakdown). For a base-versus-feature comparison, use the table in the previous 
 If your agent runtime has subagents, split the independent work and keep the judgment in the main session.
 
 - **Step 1 (read the ticket):** one subagent reads a long ticket, its comments and linked PR text and returns the ACs verbatim plus any comment that changes one. The main session writes `manifest.json` (it is the only writer of that file).
-- **Step 2 (write checks):** one subagent per AC or per adapter (`bdd/` vs `api/`), each writing only its own files (`bdd/features/ac3.feature` and its steps file, never a shared one). Give each the AC text, the target and how to read the app's behavior. The main session reviews every check against the AC's claim before any run.
+- **Step 2 (write checks):** one subagent per AC or per adapter (`bdd/` vs `api/`), each writing only its own files (`bdd/ac3.spec.mjs`, never a shared one). Give each the AC text, the target and how to read the app's behavior. The main session reviews every check against the AC's claim before any run.
 - **Step 3 (run):** the main session runs the proofs. Base and feature runs can go in parallel only when they share nothing (for example two `--url` targets); runs that share a scratch resource such as a database name must stay sequential. Do not hand a full run to a subagent to debug open-endedly.
 - **Bound every subagent:** tell it to stop and report after two failed fix attempts or 15 minutes, to report names, counts and paths only (no credentials, no customer data), and not to start long-lived services without stopping them.
 - **Verify, don't trust:** read the report yourself; a subagent's "all pass" is a claim, not evidence.

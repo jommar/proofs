@@ -103,80 +103,21 @@ test('isolated BDD runs emit only checked facts, block unmet prerequisites and r
   const identity = origin.replace('https://', 'https://auth.');
   const adapterMirror = join(root, 'checks', 'proofs', 'bdd');
   const ticket = join(adapterMirror, 'ticket');
-  await mkdir(join(ticket, 'features'), { recursive: true });
-  await mkdir(join(ticket, 'steps'));
+  await mkdir(ticket, { recursive: true });
   // A ticket snapshot can preserve the author-facing relative import without
-  // creating a second playwright-bdd test instance.
+  // creating a second Playwright test instance.
   await writeFile(join(adapterMirror, 'fixtures.mjs'), `export * from ${JSON.stringify(fixture)};\n`);
   await writeFile(join(adapterMirror, 'package.json'), '{"type":"module"}\n');
   const scratch = join(root, 'shared-run-root');
   await mkdir(scratch);
-  await writeFile(join(ticket, 'features', 'proof.feature'), `Feature: Synthetic local proof
-  @AC1
-  Scenario: Authenticate inside one browser context
-    Given a signed-in browser
-    Then the synthetic page is authenticated
-
-  @AC2 @AC9
-  Scenario: One result cannot prove distinct criteria
-    Then an explicit check passes
-
-  @AC3
-  Scenario: Check an observed mismatch
-    Then the count matches
-
-  @AC4
-  Scenario: Missing fixture
-    Given the fixture is absent
-
-  @AC5
-  Scenario: Refuse origin outside this run
-    When the browser is redirected
-
-  @AC6
-  Scenario: A noop is not evidence
-    Given a noop
-      """
-      @AC999
-      """
-
-  @AC7
-  Scenario: Refuse unsafe observation content
-    Then a raw observation is attempted
-
-  @AC8
-  Scenario: Refuse an off-origin setup redirect
-    Given the setup API is redirected
-
-  @AC10
-  Scenario: Unreachable HTTP service is not a product failure
-    When the unavailable "HTTP" service is opened
-
-  @AC11
-  Scenario: Unreachable HTTPS service is not a product failure
-    When the unavailable "HTTPS" service is opened
-
-  @AC12
-  Scenario: The application's own HTTP 502 is evidence
-    Then the "HTTP" application returns a real 502
-
-  @AC13
-  Scenario: The application's own HTTPS 502 is evidence
-    Then the "HTTPS" application returns a real 502
-
-  @AC14
-  Scenario: A normal download abort is harmless
-    Then the download aborts the navigation as expected
-
-  @AC15
-  Scenario: Plain-HTTP loopback proof.fetch reaches an allowed origin
-    Then the plain HTTP endpoint answers via proof.fetch
-`);
-  await writeFile(join(ticket, 'steps', 'proof.js'), `
-import { Given, When, Then } from '../../fixtures.mjs';
+  await writeFile(join(ticket, 'proof.spec.mjs'), `
+import { test } from '../fixtures.mjs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-Given('a signed-in browser', async ({ proof }) => {
+
+// Commented tags like @AC998 must not be discovered.
+
+test('Authenticate inside one browser context', { tag: '@AC1' }, async ({ page, proof }) => {
   await writeFile(join(process.env.PROOF_RUN_DIR, 'synthetic-asset.txt'), 'synthetic', { flag: 'wx' });
   if (process.env.PROOF_CONTEXT_REGION2 !== 'synthetic-zone' || process.env.PROOF_API_HEADERS !== undefined) {
     proof.block('invalid_runtime_context');
@@ -184,41 +125,73 @@ Given('a signed-in browser', async ({ proof }) => {
   await proof.fetch(process.env.PROOF_IDENTITY2_URL + '/auth', {
     headers: { Authorization: 'Bearer ' + process.env.PROOF_PASSWORD },
   });
-});
-Then('the synthetic page is authenticated', async ({ page, proof }) => {
   await page.goto(process.env.PROOF_STOREFRONT_URL);
   const signedIn = await page.locator('main').textContent() === 'Authenticated';
   proof.check(signedIn, { signedIn });
 });
-Then('the count matches', ({ proof }) => proof.check(false, { matching: 0 }));
-Then('an explicit check passes', ({ proof }) => proof.check(true, { visible: true }));
-Given('the fixture is absent', ({ proof }) => proof.block('missing_fixture'));
-When('the browser is redirected', async ({ page, proof }) => {
+
+test('One result cannot prove distinct criteria', { tag: ['@AC2', '@AC9'] }, ({ proof }) => {
+  proof.check(true, { visible: true });
+});
+
+test('Check an observed mismatch', { tag: '@AC3' }, ({ proof }) => {
+  proof.check(false, { matching: 0 });
+});
+
+test('Missing fixture', { tag: '@AC4' }, ({ proof }) => {
+  proof.block('missing_fixture');
+});
+
+test('Refuse origin outside this run', { tag: '@AC5' }, async ({ page, proof }) => {
   await page.goto(process.env.PROOF_STOREFRONT_URL + '/redirect').catch(() => undefined);
   proof.check(false, { reachedExpectedPage: false });
 });
-Given('a noop', ({}, _value) => {});
-Then('a raw observation is attempted', ({ proof }) => proof.check(true, { body: 'fake-private-body' }));
-Given('the setup API is redirected', async ({ proof }) => { await proof.fetch(process.env.PROOF_STOREFRONT_URL + '/redirect'); });
-When('the unavailable {string} service is opened', async ({ page, proof }, scheme) => {
-  await page.goto(process.env['PROOF_DEAD_' + scheme + '_URL']).catch(() => undefined);
+
+test('A noop is not evidence', { tag: '@AC6' }, () => {
+  const ignoredBodyString = '@AC999';
+  void ignoredBodyString;
+});
+
+test('Refuse unsafe observation content', { tag: '@AC7' }, ({ proof }) => {
+  proof.check(true, { body: 'fake-private-body' });
+});
+
+test('Refuse an off-origin setup redirect', { tag: '@AC8' }, async ({ proof }) => {
+  await proof.fetch(process.env.PROOF_STOREFRONT_URL + '/redirect');
+});
+
+test('Unreachable HTTP service is not a product failure', { tag: '@AC10' }, async ({ page, proof }) => {
+  await page.goto(process.env.PROOF_DEAD_HTTP_URL).catch(() => undefined);
   proof.check(false, { visible: false });
 });
-Then('the {string} application returns a real 502', async ({ page, proof }, scheme) => {
-  const url = scheme === 'HTTP' ? process.env.PROOF_HTTP_URL : process.env.PROOF_STOREFRONT_URL;
-  const response = await page.goto(url + '/actual-502');
+
+test('Unreachable HTTPS service is not a product failure', { tag: '@AC11' }, async ({ page, proof }) => {
+  await page.goto(process.env.PROOF_DEAD_HTTPS_URL).catch(() => undefined);
+  proof.check(false, { visible: false });
+});
+
+test("The application's own HTTP 502 is evidence", { tag: '@AC12' }, async ({ page, proof }) => {
+  const response = await page.goto(process.env.PROOF_HTTP_URL + '/actual-502');
   const appError = response.status() === 502;
   const forwardedMarker = response.headers()['x-proof-proxy-failure'] !== undefined;
-  proof.check(appError && (scheme === 'HTTPS' || !forwardedMarker), { appError });
+  proof.check(appError && !forwardedMarker, { appError });
 });
-Then('the download aborts the navigation as expected', async ({ page, proof }) => {
+
+test("The application's own HTTPS 502 is evidence", { tag: '@AC13' }, async ({ page, proof }) => {
+  const response = await page.goto(process.env.PROOF_STOREFRONT_URL + '/actual-502');
+  const appError = response.status() === 502;
+  proof.check(appError, { appError });
+});
+
+test('A normal download abort is harmless', { tag: '@AC14' }, async ({ page, proof }) => {
   const failed = page.waitForEvent('requestfailed');
   await page.goto(process.env.PROOF_HTTP_URL + '/download').catch(() => undefined);
   const request = await failed;
   const expectedAbort = request.isNavigationRequest() && request.failure()?.errorText === 'net::ERR_ABORTED';
   proof.check(expectedAbort, { expectedAbort });
 });
-Then('the plain HTTP endpoint answers via proof.fetch', async ({ proof }) => {
+
+test('Plain-HTTP loopback proof.fetch reaches an allowed origin @AC15', async ({ proof }) => {
   const response = await proof.fetch(process.env.PROOF_HTTP_URL + '/http-ping');
   const body = await response.json();
   proof.check(response.status() === 200 && body.ok === true, { ok: body.ok === true });
@@ -278,7 +251,7 @@ Then('the plain HTTP endpoint answers via proof.fetch', async ({ proof }) => {
   assert.deepEqual(refused, expected.map(({ ac }) => ({ ac, status: 'blocked', observed: { reason: 'invalid_runtime_origin' } })));
   assert.equal(forbiddenRequests, 0);
   assert.deepEqual((await readdir(scratch)).sort(), ['after.ndjson', 'before.ndjson', 'remote.ndjson']);
-  assert.deepEqual(await readdir(ticket), ['features', 'steps']);
+  assert.deepEqual(await readdir(ticket), ['proof.spec.mjs']);
 
   // PROOF_ACS runs only selected ACs and PROOF_DIAGNOSTICS_DIR records failure details outside the NDJSON evidence.
   const diagDir = join(scratch, 'diag');
