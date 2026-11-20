@@ -264,6 +264,7 @@ test('run.mjs auto-generates dashboard.html and dashboard.mjs CLI handles valid 
   t.after(() => rm(root, { recursive: true, force: true }));
   const ticket = 'DASH-42';
   await mkdir(join(root, '.proofs', ticket, 'api'), { recursive: true });
+  await writeFile(join(root, '.proofs', ticket, 'api', 'placeholder.check'), 'placeholder check');
   await writeFile(join(root, '.proofs', ticket, 'manifest.json'), JSON.stringify({
     acs: [{ id: 'AC1', claim: 'Dashboard shows pass verdict' }],
   }));

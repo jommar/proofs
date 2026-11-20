@@ -29,7 +29,10 @@ async function workspace(t) {
   await mkdir(repo);
   git(repo, 'init', '-q');
   git(repo, '-c', 'user.name=Proof Test', '-c', 'user.email=proof@example.invalid', 'commit', '-qm', 'base', '--allow-empty');
-  for (const name of ['bdd', 'api']) await mkdir(join(root, '.proofs', ticket, name), { recursive: true });
+  for (const name of ['bdd', 'api']) {
+    await mkdir(join(root, '.proofs', ticket, name), { recursive: true });
+    await writeFile(join(root, '.proofs', ticket, name, 'placeholder.check'), 'placeholder check');
+  }
   await writeFile(join(root, '.proofs', ticket, 'manifest.json'), JSON.stringify({ acs: [{ id: 'AC1', claim: 'Synthetic claim' }] }));
   await writeFile(join(root, 'runtime.mjs'), 'throw new Error("must not import the runtime fixture");\n');
   return { root, args: [ticket, '--worktree', 'app=app', '--runtime', 'runtime.mjs'] };

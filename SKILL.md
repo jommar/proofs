@@ -62,7 +62,7 @@ Targets and flags:
 - `--worktree [app=]<dir>`: test one local checkout (its committed `HEAD`). Run it on the base and again on the feature branch, then compare. An AC that fails on base and passes on the feature is the good result; a pass on the base is valid, so do not manufacture a regression.
 - `--url [name=]<origin>`: test a running environment; nothing is started. `--context key=value` passes check inputs (such as a dummy tenant) and `--branch <label>` only labels the report.
 - `--login <userVar>,<passVar>`: names the environment variables holding the login, never the values. They are read from the shell, then `<workspace>/.env`. Never print them.
-- `--only bdd|api` limits adapters. `--runtime <file>` uses a custom runtime.
+- `--only bdd|api` limits adapters. An empty `bdd/` or `api/` folder is skipped with a `Warning:` (its ACs stay Uncovered), so `--only` is not needed to step around it. `--runtime <file>` uses a custom runtime.
 - `--serve` keeps a local `--worktree` sandbox running until `Ctrl-C` and prints the matching `--url` iterate command so you can fix and re-run checks without restarting services.
 - `--ac AC1,AC3` runs only the listed ACs and marks unselected ACs as `Skipped — filtered out by --ac` (partial run; never treat as full ticket proof).
 - `--debug` retains private `0o600` diagnostics (`<run-dir>/diagnostics/`: `service.log`, `bddgen.log`, `playwright.log`, `bdd-failures.json`, `api.log`, and Playwright failure traces/screenshots) even on a passing run. Any failing or blocked run (including a failed `--check`) automatically retains non-empty diagnostics there while keeping `report.md` strictly redacted.

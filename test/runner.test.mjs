@@ -45,9 +45,11 @@ async function changed(root) {
   return { worktree, sha };
 }
 
+// An adapter folder needs a check file to run: an empty one is skipped.
 async function adapter(root, name = 'bdd') {
   const dir = join(ticketDir(root), name);
   await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'placeholder.check'), 'placeholder check');
   return dir;
 }
 
@@ -292,6 +294,7 @@ test('rejects invalid manifest and unsafe or duplicate CSVs before runtime', asy
   const secondId = 'docs-release_12.3';
   const secondTicket = join(root, '.proofs', secondId);
   await mkdir(join(secondTicket, 'bdd'), { recursive: true });
+  await writeFile(join(secondTicket, 'bdd', 'placeholder.check'), 'placeholder check');
   await writeFile(join(secondTicket, 'manifest.json'), JSON.stringify(manifest));
   const { plan } = await execute(root, {}, [secondId, '--plan']);
   assert.match(plan, /^Plan: docs-release_12\.3/);
@@ -420,6 +423,36 @@ test('missing adapters leave ACs uncovered; a fail or blocked result cannot exit
     assert.match(report, new RegExp(`^\\| AC1 .*${status}`, 'im'));
     assert.match(report, /^\| AC2 .*Uncovered/m);
   }
+});
+
+test('an empty adapter folder is skipped with a warning instead of blocking every AC', async t => {
+  const { root, manifest, save } = await workspace(t);
+  manifest.acs.push({ id: 'AC2', claim: 'Only an API check would cover this' });
+  await save();
+  await adapter(root);
+  await mkdir(join(ticketDir(root), 'api', 'empty-subfolder'), { recursive: true });
+  const warning = `api adapter skipped: its folder .proofs/${ticket}/api/ holds no check files`;
+  const { plan } = await execute(root, {}, [ticket, '--plan']);
+  assert.match(plan, /^Adapters: bdd \(skipped, empty folder: api\)$/m);
+  assert.ok(plan.includes(`- Warning: ${warning}`), plan);
+  const { check } = await execute(root, fakes(), [ticket, '--check']);
+  assert.ok(check.includes(`- ${warning}`), check);
+  const invoked = [];
+  const deps = fakes();
+  // The real api adapter cannot produce evidence from an empty folder; running it used to block every AC.
+  deps.invoke = async ({ name, env }) => {
+    invoked.push(name);
+    if (name === 'bdd') await writeResults(env.PROOF_RESULTS, [result()]);
+    return 0;
+  };
+  const outcome = await execute(root, deps);
+  const report = await readFile(outcome.reportPath, 'utf8');
+  assert.deepEqual(invoked, ['bdd']);
+  assert.match(report, /^\| AC1 .*\| Pass — bdd: pass/m);
+  assert.match(report, /^\| AC2 .*Uncovered/m, 'a missing check is never a pass');
+  assert.equal(outcome.exitCode, 1);
+  assert.ok(report.includes(`## Execution notes\n\n- ${warning}.`), report);
+  assert.doesNotMatch(report, /## Run issues/);
 });
 
 test('capture, start, env validation, and cleanup errors surface separately without leaked exception text', async t => {
@@ -874,6 +907,7 @@ test('a ticket in the harness\'s own .proofs/ is found first, and its report goe
   };
   t.after(() => Promise.all([rm(inputs, { recursive: true, force: true }), rm(outputs, { recursive: true, force: true }), forgetRuns()]));
   await mkdir(join(inputs, 'api'), { recursive: true });
+  await writeFile(join(inputs, 'api', 'placeholder.check'), 'placeholder check');
   await writeFile(join(inputs, 'manifest.json'), JSON.stringify({ acs: [{ id: 'AC1', claim: 'harness-local claim' }] }));
 
   // A workspace with no .proofs/ of its own: only the harness copy can satisfy the lookup.
@@ -891,6 +925,7 @@ test('a ticket in the harness\'s own .proofs/ is found first, and its report goe
   const both = await mkdtemp(join(tmpdir(), 'proof-both-ws-'));
   t.after(() => rm(both, { recursive: true, force: true }));
   await mkdir(join(both, '.proofs', id, 'api'), { recursive: true });
+  await writeFile(join(both, '.proofs', id, 'api', 'placeholder.check'), 'placeholder check');
   await writeFile(join(both, '.proofs', id, 'manifest.json'), JSON.stringify({ acs: [{ id: 'AC1', claim: 'workspace claim' }] }));
   const preferred = await run([id, '--url', 'https://trips.example.test'], {
     workspace: both, parentEnv: { PATH: process.env.PATH },

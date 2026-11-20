@@ -57,6 +57,8 @@ A startup failure in a report names the service, step and exit code, for example
 
 `--only bdd` or `--only api` (repeatable) runs just those adapters; the other ACs report as uncovered. Use it to keep a read-only run away from checks that write.
 
+An adapter folder (`bdd/` or `api/`) that holds no check files is treated as absent: the adapter is not run, `--plan` and `--check` print a `Warning:` naming the folder, and the report's Execution notes say it was skipped. ACs that only it would cover report Uncovered, never Pass.
+
 `--ac AC1,AC3` (repeatable) runs only the listed ACs and marks unselected ACs as skipped (partial run). Combine with `--serve` (which keeps a local `--worktree` sandbox running until `Ctrl-C` and prints the matching `--url` iterate command) to debug checks without restarting services each time.
 
 `--debug` retains private local diagnostics (`0o600` files under `<run-dir>/diagnostics/`: `service.log`, adapter logs, `bdd-failures.json`, and Playwright failure traces/screenshots) even on a passing run. Any failing or blocked run (including a failed `--check`) automatically retains non-empty diagnostics there while keeping `report.md` strictly redacted. Each report and `runs.json` entry records total and per-phase durations (`startup`, adapters, `teardown`).

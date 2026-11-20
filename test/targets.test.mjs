@@ -54,6 +54,7 @@ async function workspace(t, manifest = {}) {
   git(repo, 'commit', '-qm', 'base', '--allow-empty');
   const dir = join(root, '.proofs', ticket);
   await mkdir(join(dir, 'bdd'), { recursive: true });
+  await writeFile(join(dir, 'bdd', 'placeholder.check'), 'placeholder check');
   await writeFile(join(root, '.proofs', 'targets.json'), JSON.stringify(PROFILES));
   await writeFile(join(root, 'runtime.mjs'), 'export {};\n');
   const save = extra => writeFile(join(dir, 'manifest.json'), JSON.stringify({ acs: ACS, ...manifest, ...extra }));
