@@ -24,6 +24,7 @@ Custom runtimes (passed via `--runtime <path>`, `PROOFS_RUNTIME`, or `.proofs-ru
 
 - `export async function startSandbox({ id, dir, workspace, commits, dataset, options, env, signal })` → returns `{ env, close }`.
 - `export async function captureDataset({ dir, workspace, options, signal })` *(optional)* → returns a dataset handle passed to `startSandbox`.
+- `export async function preflight({ workspace, commits, options, env, signal })` *(optional)* → returns `{ problems, warnings }` (arrays of short strings with names only, never values). `--check` calls it before starting anything and lists its findings with the harness's own; a problem stops the sandbox from starting. The built-in runtime exports one too (missing `passEnv` variables are warnings, missing `link` targets problems), which also runs at `--plan`.
 - Write process logs to `join(dir, 'service.log')` (`0o600`) so `run.mjs` automatically preserves them under `diagnostics/` on non-pass or `--debug` runs.
 - Mark user-safe failure messages with `Object.assign(new Error(msg), { proofSafe: true })` (service/step/exit code only — never secrets, command text, or tenant data).
 

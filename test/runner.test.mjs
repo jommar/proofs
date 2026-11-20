@@ -557,7 +557,7 @@ test('--post-merge no longer exists and a run without a target is rejected', asy
   const plan = args => run([ticket, ...args, '--plan'], { workspace: root, parentEnv: {} });
   await assert.rejects(plan(['--post-merge', ...feature, '--runtime', 'runtime.mjs']), /Usage/);
   await assert.rejects(plan(['--post-merge', '--url', 'https://x.test']), /Usage/);
-  await assert.rejects(plan([]), /Give a target: --url <origin> or --worktree <dir>/);
+  await assert.rejects(plan([]), /Give a target: --url <origin>, --worktree <dir> or --target <profile>/);
   await assert.rejects(plan(['--runtime', 'runtime.mjs']), /Give a target/);
   await assert.rejects(execute(root, fakes(), [ticket, '--post-merge']), /Usage/);
   await assert.rejects(run([ticket], { workspace: root, parentEnv: {}, startSandbox: async () => assert.fail('nothing starts without a target') }), /Give a target/);

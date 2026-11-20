@@ -3,6 +3,7 @@
 //   2. --worktree <feature>: the same checks run against the feature checkout and pass.
 //   3. --url app=<origin>:   the same checks run against an already-running copy of the feature build,
 //      served on this machine's network address, the way a dev or UAT environment would be.
+//   4. --summary:            the ticket's ledger merges the three runs into one AC x target matrix.
 // The built-in runtime starts the checkouts from the manifest alone: no --runtime flag, no custom module.
 //   node examples/built-in-demo.mjs
 import assert from 'node:assert/strict';
@@ -94,6 +95,11 @@ try {
   } finally {
     served.kill('SIGTERM');
   }
+
+  const { stdout: summary } = await promisify(execFile)(process.execPath, [runner, 'ACME-1', '--workspace', workspace, '--summary']);
+  console.log(`\n${summary.split('\n').filter(line => line.startsWith('|')).join('\n')}`);
+  assert.match(summary, /\| AC1 — .* \| Fail \| Pass \| Pass \| Delivered \|/, 'the summary orders base and feature by Git ancestry');
+  console.log('\nVerified: --summary shows the base as Before, the feature as After, and the running URL beside them.');
 } finally {
   await rm(workspace, { recursive: true, force: true });
 }

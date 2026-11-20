@@ -122,7 +122,7 @@ async function main() {
     await symlink(join(directory, 'node_modules'), join(scratch, 'node_modules'), 'dir');
     const envKeys = new Set([
       'PATH', 'LANG', 'LC_ALL', 'PROOF_CSV_DIR', 'PROOF_SIDE', 'PROOF_TICKET',
-      'PROOF_USERNAME', 'PROOF_PASSWORD', 'PROOF_TARGET', 'PROOF_INSECURE_TLS',
+      'PROOF_USERNAME', 'PROOF_PASSWORD', 'PROOF_TARGET', 'PROOF_INSECURE_TLS', 'PROOF_PERSONA', 'PROOF_TARGET_NAME',
     ]);
     const env = Object.fromEntries(Object.entries(process.env)
       .filter(([key]) => envKeys.has(key) || (proofContextKey.test(key) && !key.endsWith('_URL'))));

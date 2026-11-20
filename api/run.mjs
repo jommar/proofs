@@ -217,7 +217,7 @@ async function run(ticket, manifest, env, diagFile) {
       try { origins[key] = localOrigin(value); } catch {
         return blocked(specs, 'Invalid runtime origin; expected a loopback HTTP(S) origin');
       }
-    } else if (['PROOF_SIDE', 'PROOF_TICKET'].includes(key) || (proofContextKey.test(key) && !key.endsWith('_URL'))) {
+    } else if (['PROOF_SIDE', 'PROOF_TICKET', 'PROOF_PERSONA', 'PROOF_TARGET_NAME'].includes(key) || (proofContextKey.test(key) && !key.endsWith('_URL'))) {
       globals.set(key, value);
     }
   }

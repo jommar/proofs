@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { startSandbox } from '../runtime/command.mjs';
+import { preflight, startSandbox } from '../runtime/command.mjs';
 
 const git = (repo, ...args) => execFileSync('git', ['-C', repo, '-c', 'user.name=T', '-c', 'user.email=t@example.test', ...args], { encoding: 'utf8' }).trim();
 const server = body => `require('node:http').createServer((q, s) => s.end(${JSON.stringify(body)} + (process.env.GREETING || ''))).listen(Number(process.env.PORT), '127.0.0.1');\n`;
@@ -168,4 +168,16 @@ test('a spawn error on service start rejects cleanly instead of crashing with an
     startSandbox({ id: 'proof-spawn', dir: join(root, 'spawn'), commits: { app: { repo, sha: commits[0] } }, options, signal: new AbortController().signal }),
     error => error.proofSafe === true && /app: start failed/.test(error.message),
   );
+});
+
+test('{workspace} expands to the workspace in commands and env, and preflight lists missing links and passEnv at once', async t => {
+  const { root, repo, commits } = await fixture(t);
+  const options = { services: { app: { start: 'node server.js', ready: '/', env: { GREETING: '-{workspace}' }, link: ['missing_dir', 'server.js'] } }, passEnv: ['PROOFS_TEST_UNSET'] };
+  const found = await preflight({ options, commits: { app: { repo, sha: commits[1] } }, env: {} });
+  assert.deepEqual(found.problems, ['app: link target missing_dir does not exist in the app checkout.']);
+  assert.deepEqual(found.warnings, ['passEnv variable PROOFS_TEST_UNSET is not set.']);
+  delete options.services.app.link;
+  const sandbox = await startSandbox({ id: 'proof-ws', dir: join(root, 'ws'), workspace: '/fake/ws', commits: { app: { repo, sha: commits[1] } }, options, signal: new AbortController().signal });
+  t.after(() => sandbox.close());
+  assert.equal(await body(sandbox.env.PROOF_APP_URL), 'v2-/fake/ws');
 });

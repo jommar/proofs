@@ -9,7 +9,9 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { writeDashboard } from './lib/dashboard.mjs';
 import { formatPlan, makeReport, readEvidence } from './lib/evidence.mjs';
-import { record, resolveInputs } from './lib/inputs.mjs';
+import { isAncestor, record, resolveInputs } from './lib/inputs.mjs';
+import { appendLedger, ledgerEntry, readLedger } from './lib/ledger.mjs';
+import { summarize } from './lib/summary.mjs';
 import { localOrigin, proofContextKey, proofUrlKey } from './lib/origins.mjs';
 import { describeRun, recordRun } from './lib/runs.mjs';
 import { readProofInputs, stageProofInputs, unlockProofInputs } from './lib/snapshot.mjs';
@@ -23,18 +25,48 @@ function runIssue(stage, signal, error) {
   return `Failed during ${stage}${error?.proofSafe ? `: ${error.message}` : ''}.`;
 }
 
-// Any HTTP answer (even 401/404) proves the host is reachable; TLS is verified unless --insecure-tls.
-function reachable(origin, insecure) {
+// Any HTTP answer proves the host is reachable (the status is returned, 0 when nothing answered); TLS is
+// verified unless --insecure-tls. With `limit`, also returns up to that many bytes of the body.
+function request(url, insecure, { method = 'HEAD', limit = 0 } = {}) {
   return new Promise(resolve => {
-    const client = origin.startsWith('https:') ? https : http;
-    const request = client.request(origin, { method: 'HEAD', agent: false, rejectUnauthorized: !insecure, signal: AbortSignal.timeout(15_000) }, response => {
-      response.resume();
-      resolve(true);
+    const client = url.startsWith('https:') ? https : http;
+    const req = client.request(url, { method, agent: false, rejectUnauthorized: !insecure, signal: AbortSignal.timeout(15_000) }, response => {
+      const chunks = [];
+      let size = 0;
+      response.on('data', chunk => {
+        if (size < limit) chunks.push(chunk.subarray(0, limit - size));
+        size += chunk.length;
+      });
+      response.on('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
+      response.on('error', () => resolve({ status: response.statusCode, body: '' }));
     });
-    request.on('error', () => resolve(false));
-    request.end();
+    req.on('error', () => resolve({ status: 0, body: '' }));
+    req.end();
   });
 }
+
+const BUILD = /^[A-Za-z0-9._+:-]{1,80}$/;
+
+// How a build exposes its version is app-specific: the profile names an origin, a path and optionally a JSON field.
+// Only a short identifier-like value is kept; anything else counts as not detected.
+async function detectBuild(version, env, insecure) {
+  const origin = env[`PROOF_${version.url.toUpperCase()}_URL`];
+  if (!origin) return null;
+  const { status, body } = await request(`${origin}${version.path}`, insecure, { method: 'GET', limit: 64 * 1024 });
+  if (status < 200 || status >= 300) return null;
+  let value = body.trim();
+  if (version.field) {
+    try {
+      value = version.field.split('.').reduce((node, key) => (record(node) ? node[key] : undefined), JSON.parse(body));
+    } catch { return null; }
+  }
+  value = typeof value === 'number' ? String(value) : value;
+  return typeof value === 'string' && BUILD.test(value.trim()) ? value.trim() : null;
+}
+
+// For a running environment the build must name the commit: some hex token in it is a prefix of the expected SHA
+// (or the other way round). Ancestry cannot be checked remotely.
+const buildMatches = (build, sha) => (build?.match(/[0-9a-f]{7,40}/gi) ?? []).some(token => sha.startsWith(token.toLowerCase()) || token.toLowerCase().startsWith(sha));
 
 async function privateDir(path, existing = false) {
   try {
@@ -80,7 +112,7 @@ function parseApiHeaders(raw, origins, credentials) {
   })));
 }
 
-async function adapterEnv(sandbox, { ticket, target }, side, dir, sandboxDir, parentEnv) {
+async function adapterEnv(sandbox, { ticket, target, persona, profile, secrets = [] }, side, dir, sandboxDir, parentEnv) {
   const env = Object.fromEntries(['PATH', 'LANG', 'LC_ALL'].filter(key => parentEnv[key] !== undefined).map(key => [key, parentEnv[key]]));
   if (!record(sandbox.env)) throw new Error('Sandbox environment is required.');
   const origins = new Set();
@@ -132,7 +164,10 @@ async function adapterEnv(sandbox, { ticket, target }, side, dir, sandboxDir, pa
   Object.assign(env, {
     HOME: dir, TMPDIR: dir, PROOF_RUN_DIR: dir, PROOF_CSV_DIR: join(dir, 'csv'),
     PROOF_SIDE: side, PROOF_TICKET: ticket,
+    ...(persona ? { PROOF_PERSONA: persona } : {}),
+    ...(profile ? { PROOF_TARGET_NAME: profile.name } : {}),
   });
+  for (const secret of secrets) credentials.add(secret);
   return { env, scoped: { bdd, api }, credentials: [...credentials] };
 }
 
@@ -221,7 +256,7 @@ async function cleanupScratch(scratch, phases) {
 }
 
 async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, adapterTimeoutMs, parentEnv, signal }) {
-  const outcome = { rows: [], issues: [], invoked: false, timings: { adapters: {} } };
+  const outcome = { rows: [], issues: [], warnings: [], invoked: false, timings: { adapters: {} } };
   const sandboxDir = join(dir, 'sandbox');
   const checksDir = join(dir, 'checks');
   let sandbox;
@@ -238,13 +273,30 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
     const { env: shared, scoped, credentials } = await adapterEnv(sandbox, input, side, checksDir, sandboxDir, parentEnv);
     outcome.timings.startupMs = Date.now() - startupStart;
     const ids = new Set(input.acs.map(({ id }) => id));
+    outcome.context = Object.fromEntries(Object.entries(shared).filter(([key]) => proofContextKey.test(key) && !key.endsWith('_URL'))
+      .map(([key, value]) => [key.slice('PROOF_CONTEXT_'.length).toLowerCase(), value]));
+    const insecure = input.target ? input.target.insecureTls : true;
     if (input.check && input.target) {
       for (const [key, origin] of Object.entries(sandbox.env).filter(([name]) => /^PROOF_[A-Z0-9_]+_URL$/.test(name))) {
-        if (!await reachable(origin, input.target.insecureTls)) outcome.issues.push(`${key.slice(6, -4).toLowerCase()} is not reachable (DNS, connection or TLS).`);
+        const name = key.slice(6, -4).toLowerCase();
+        const { status } = await request(origin, insecure);
+        if (!status) outcome.issues.push(`${name} is not reachable (DNS, connection or TLS).`);
+        else if ([401, 403].includes(status)) {
+          outcome.warnings.push(input.login
+            ? `${name} answered HTTP ${status}: reachable but unauthenticated. --check does not log in, so the configured login is not verified.`
+            : `${name} answered HTTP ${status} and no login is configured; checks that need a session will block.`);
+        }
       }
     }
+    if (input.version) {
+      outcome.build = await detectBuild(input.version, shared, insecure);
+    }
+    if (input.expectCommit && input.target && !buildMatches(outcome.build, input.expectCommit)) {
+      outcome.issues.push(`The environment's build ${outcome.build ? 'does not match' : 'could not be detected, so it cannot be matched to'} --expect-commit ${input.expectCommit}.`);
+    }
     const diagRoot = await privateDir(join(checksDir, 'diagnostics'), true);
-    for (const adapter of input.check ? [] : input.adapters) {
+    const adapters = input.check || outcome.issues.length || input.runAcs?.length === 0 ? [] : input.adapters;
+    for (const adapter of adapters) {
       signal.throwIfAborted();
       const adapterStart = Date.now();
       const adapterDiag = await privateDir(join(diagRoot, adapter.name), true);
@@ -253,7 +305,7 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
         PROOF_RESULTS: join(checksDir, `${adapter.name}.ndjson`),
         PROOF_DIAGNOSTICS_DIR: adapterDiag,
         ...(input.debug ? { PROOF_DEBUG: '1' } : {}),
-        ...(input.selectedAcs?.length ? { PROOF_ACS: input.selectedAcs.join(',') } : {}),
+        ...(input.runAcs ? { PROOF_ACS: input.runAcs.join(',') } : {}),
       };
       const deadline = AbortSignal.timeout(adapterTimeoutMs);
       let code;
@@ -277,7 +329,7 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
       }
       let rows;
       try {
-        rows = await readEvidence(env.PROOF_RESULTS, ids, credentials, { allowEmpty: input.selectedAcs?.length > 0 });
+        rows = await readEvidence(env.PROOF_RESULTS, ids, credentials, { allowEmpty: Boolean(input.runAcs) });
       } catch {
         outcome.issues.push(`${adapter.name} adapter did not produce valid evidence.`);
         continue;
@@ -313,7 +365,7 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
   return outcome;
 }
 
-function formatServeReady(ticket, env, login) {
+function formatServeReady(ticket, env, login, { profile, persona } = {}) {
   const urls = Object.entries(env).filter(([key]) => proofUrlKey.test(key))
     .map(([key, origin]) => [key.slice(6, -4).toLowerCase(), origin]);
   const contexts = Object.entries(env).filter(([key]) => proofContextKey.test(key) && !key.endsWith('_URL'))
@@ -321,7 +373,8 @@ function formatServeReady(ticket, env, login) {
   const urlFlags = urls.map(([name, origin]) => `--url ${name}=${origin}`).join(' ');
   const ctxFlags = contexts.map(([key, value]) => `--context ${key}=${value}`).join(' ');
   const loginFlag = login ? ` --login ${login.usernameEnv},${login.passwordEnv}` : '';
-  const cmd = `node proofs/run.mjs ${ticket} ${urlFlags}${ctxFlags ? ` ${ctxFlags}` : ''}${loginFlag} --debug`;
+  const profileFlags = `${profile ? ` --target ${profile.name}` : ''}${persona ? ` --persona ${persona}` : ''}`;
+  const cmd = `node proofs/run.mjs ${ticket}${profileFlags} ${urlFlags}${ctxFlags ? ` ${ctxFlags}` : ''}${loginFlag} --debug`;
   return [
     `Sandbox ready for ${ticket} (Ctrl-C to stop):`,
     ...urls.map(([name, origin]) => `  ${name}: ${origin}`),
@@ -357,7 +410,7 @@ async function runServe(input, id, scratch, { parentEnv, signal, captureDataset,
     stage = 'sandbox environment validation';
     const { env: shared } = await adapterEnv(sandbox, input, 'run', checksDir, sandboxDir, parentEnv);
     const urls = Object.fromEntries(Object.entries(shared).filter(([key]) => proofUrlKey.test(key)));
-    const message = formatServeReady(input.ticket, shared, input.runtimeOptions?.login);
+    const message = formatServeReady(input.ticket, shared, input.runtimeOptions?.login, input);
     if (onReady) await onReady({ urls, env: shared, message });
     else console.log(message);
     if (!signal.aborted) {
@@ -375,6 +428,29 @@ async function runServe(input, id, scratch, { parentEnv, signal, captureDataset,
 
 // Target mode starts nothing: the sandbox is the running environment the operator named with --url.
 const targetRuntime = target => ({ startSandbox: async () => ({ env: { ...target.env }, close: async () => {} }) });
+
+// A runtime may export preflight({ workspace, commits, options, env, signal }) returning { problems, warnings }
+// (arrays of short strings, shown on the console only). --check calls it before starting anything.
+async function runtimePreflight(input, options) {
+  if (input.target || input.builtInRuntime) return { problems: [], warnings: [] };
+  const runtime = options.startSandbox ? options : await import(pathToFileURL(input.runtime).href);
+  if (typeof runtime.preflight !== 'function') return { problems: [], warnings: [] };
+  const clean = list => (Array.isArray(list) ? list : []).filter(item => typeof item === 'string' && item.trim() && item.length <= 300 && !/[\x00-\x1f\x7f]/.test(item));
+  try {
+    const found = await runtime.preflight({
+      workspace: input.workspace, commits: structuredClone(input.commits.run), options: structuredClone(input.runtimeOptions), env: input.env, signal: options.signal,
+    });
+    return Array.isArray(found) ? { problems: clean(found), warnings: [] } : { problems: clean(found?.problems), warnings: clean(found?.warnings) };
+  } catch (error) {
+    return { problems: [`Runtime preflight failed${error?.proofSafe ? `: ${error.message}` : ''}.`], warnings: [] };
+  }
+}
+
+const formatCheck = (issues, warnings, build) => [
+  issues.length ? `NOT READY — ${issues.join(' ')}` : warnings.length ? 'ready with warnings' : 'ready',
+  ...(build !== undefined ? [`Build: ${build ?? 'build not detected'}`] : []),
+  ...(warnings.length ? ['Warnings:', ...warnings.map(text => `- ${text}`)] : []),
+].join('\n');
 
 async function runPhases(input, snapshot, id, scratch, options) {
   const { signal } = options;
@@ -423,9 +499,32 @@ export async function run(args, {
   captureDataset, startSandbox, invoke = invokeChild, adapterTimeoutMs = ADAPTER_TIMEOUT_MS, onReady, cleanup = cleanupScratch,
 } = {}) {
   const input = await resolveInputs(args, workspace, parentEnv);
+  if (input.summary) {
+    const entries = await readLedger(input.ticketDir);
+    if (!entries.length) return { exitCode: 1, summary: `No runs recorded for ${input.ticket} yet (.proofs/${input.ticket}/ledger.json).` };
+    const { text, complete } = summarize({
+      ticket: input.ticket, acs: input.acs, entries, profileNames: Object.keys(input.profiles),
+      isAncestor: (repo, a, b) => isAncestor(join(input.workspace, repo), a, b, parentEnv.PATH),
+    });
+    return { exitCode: complete ? 0 : 1, summary: text };
+  }
   const snapshot = await readProofInputs(input);
   input.proofDigest = snapshot.digest;
-  if (input.plan) return { exitCode: 0, plan: formatPlan(input, adapterTimeoutMs) };
+  if (input.plan) return { exitCode: input.preflight.problems.length ? 1 : 0, plan: formatPlan(input, adapterTimeoutMs) };
+  const fatal = input.preflight.problems.filter(({ fatal }) => fatal);
+  if (!input.check && fatal.length) throw new Error(`Cannot run: ${fatal.map(({ text }) => text).join(' ')}`);
+
+  if (input.check) {
+    // Collect every problem at once: the offline preflight, the runtime's own hook, then the start or probes.
+    const hook = await runtimePreflight(input, { signal, startSandbox, captureDataset });
+    const issues = [...input.preflight.problems.map(({ text }) => text), ...hook.problems];
+    const warnings = [...input.preflight.warnings, ...hook.warnings];
+    if (issues.length && !input.target) {
+      return { exitCode: 1, check: formatCheck([...issues, 'Sandbox not started: fix the problems above, then run --check again.'], warnings) };
+    }
+    input.preflightIssues = issues;
+    input.preflightWarnings = warnings;
+  }
 
   const id = randomUUID();
   const startedMs = Date.now();
@@ -449,19 +548,21 @@ export async function run(args, {
   if (phases.run) phases.run.timings = { ...(phases.run.timings ?? { adapters: {} }), durationMs };
 
   if (input.check) {
-    const { issues } = phases.run;
+    const { issues: runIssues } = phases.run;
+    const issues = [...input.preflightIssues, ...runIssues];
+    const warnings = [...input.preflightWarnings, ...(phases.run.warnings ?? [])];
     let diagnosticsDir;
-    if (issues.length) diagnosticsDir = await collectDiagnostics(scratch, runDir, 'run');
+    if (runIssues.length) diagnosticsDir = await collectDiagnostics(scratch, runDir, 'run');
     try { await cleanupScratch(scratch, phases); } catch { /* best-effort cleanup */ }
     if (!diagnosticsDir && !phases.run.retainSandbox) await rm(runDir, { recursive: true, force: true }).catch(() => {});
     return {
       exitCode: issues.length ? 1 : 0,
-      check: issues.length ? `NOT READY — ${issues.join(' ')}` : 'ready',
+      check: formatCheck(issues, warnings, input.version ? phases.run.build ?? null : undefined),
       ...(diagnosticsDir ? { diagnosticsDir } : {}),
     };
   }
 
-  let { report, exitCode } = makeReport(input, id, phases);
+  let { report, exitCode, statuses } = makeReport(input, id, phases);
   let diagnosticsDir;
   if (exitCode !== 0 || input.debug || phases.run.issues.length > 0) {
     diagnosticsDir = await collectDiagnostics(scratch, runDir, 'run');
@@ -471,7 +572,7 @@ export async function run(args, {
   } catch {
     phases.run.issues.push('Private run files could not be removed; check the run directory.');
     if (!diagnosticsDir) diagnosticsDir = await collectDiagnostics(scratch, runDir, 'run');
-    ({ report, exitCode } = makeReport(input, id, phases));
+    ({ report, exitCode, statuses } = makeReport(input, id, phases));
   }
   const reportPath = join(runDir, 'report.md');
   await writeFile(reportPath, report, { flag: 'wx', mode: 0o600 });
@@ -480,6 +581,9 @@ export async function run(args, {
     startedAt, exitCode, reportPath, durationMs, timings: phases.run.timings,
   }))
     .then(() => undefined, () => 'Run was not added to .proofs-out/runs.json.');
+  // The durable ledger feeds --summary; like the index, a failed write is a warning beside the report.
+  const ledgerWarning = await appendLedger(input.ticketDir, input.ticket, ledgerEntry(input, id, { startedAt, exitCode, statuses, build: phases.run.build }))
+    .then(() => undefined, () => `Run was not added to .proofs/${input.ticket}/ledger.json.`);
   let dashboardPath;
   let dashboardWarning;
   if (!runsWarning) {
@@ -491,6 +595,7 @@ export async function run(args, {
   }
   return {
     exitCode, reportPath, runsWarning,
+    ...(ledgerWarning ? { ledgerWarning } : {}),
     ...(dashboardPath ? { dashboardPath } : {}),
     ...(dashboardWarning ? { dashboardWarning } : {}),
     ...(diagnosticsDir ? { diagnosticsDir } : {}),
@@ -504,6 +609,11 @@ async function main() {
   process.on('SIGTERM', cancel);
   try {
     const result = await run(process.argv.slice(2), { signal: controller.signal });
+    if (result.summary !== undefined) {
+      console.log(result.summary);
+      process.exitCode = result.exitCode;
+      return;
+    }
     if (result.served) {
       // Ready banner was already printed before awaiting Ctrl-C.
     } else if (result.issue) {
@@ -513,6 +623,7 @@ async function main() {
     }
     if (result.diagnosticsDir) console.error(`Diagnostics: ${result.diagnosticsDir}`);
     if (result.runsWarning) console.error(result.runsWarning);
+    if (result.ledgerWarning) console.error(result.ledgerWarning);
     if (result.dashboardWarning) console.error(result.dashboardWarning);
     process.exitCode = result.exitCode;
   } catch (error) {

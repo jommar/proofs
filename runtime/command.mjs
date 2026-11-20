@@ -3,7 +3,7 @@
 // It runs the manifest's commands as the current user: review a manifest before running it.
 import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
-import { mkdir, symlink } from 'node:fs/promises';
+import { lstat, mkdir, symlink } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, isAbsolute, join, normalize } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -133,7 +133,24 @@ async function waitReady(url, child, signal, timeoutMs, getSpawnError = () => un
 // Plan-time check of the manifest's runtimeOptions, so a bad or missing services block fails before a run.
 export const validateOptions = options => { parseOptions(options); };
 
-export async function startSandbox({ id, dir, commits, options, env: operatorEnv = process.env, signal }) {
+// Optional runtime hook, also run by --plan for this built-in runtime: every problem at once, without starting
+// anything. A passEnv variable that is not set is a warning (it may be optional); a missing link target is a problem
+// because the start would fail on it. Messages hold names only, never values.
+export async function preflight({ options, commits = {}, env = process.env }) {
+  const config = parseOptions(options);
+  const problems = [];
+  const warnings = config.passEnv.filter(key => env[key] === undefined || env[key] === '').map(key => `passEnv variable ${key} is not set.`);
+  for (const [name, service] of Object.entries(config.services)) {
+    const pin = commits[service.app ?? name];
+    if (!pin) continue;
+    for (const path of list(service.link)) {
+      if (!await lstat(join(pin.repo, path)).catch(() => null)) problems.push(`${name}: link target ${path} does not exist in the ${service.app ?? name} checkout.`);
+    }
+  }
+  return { problems, warnings };
+}
+
+export async function startSandbox({ id, dir, workspace, commits, options, env: operatorEnv = process.env, signal }) {
   const config = parseOptions(options);
   const slug = id.replace(/[^A-Za-z0-9]/g, '_');
   const base = Object.fromEntries(['PATH', 'HOME', 'LANG', 'LC_ALL', ...config.passEnv]
@@ -143,7 +160,7 @@ export async function startSandbox({ id, dir, commits, options, env: operatorEnv
   await new Promise(resolve => log.once('open', resolve));
   const urls = {};
   const started = [];
-  const fill = (text, vars) => text.replace(/\{(port|dir|src|id|slug|url:[A-Za-z][A-Za-z0-9_]*)\}/g, (_, key) => {
+  const fill = (text, vars) => text.replace(/\{(port|dir|src|id|slug|workspace|url:[A-Za-z][A-Za-z0-9_]*)\}/g, (_, key) => {
     const value = key.startsWith('url:') ? urls[key.slice(4)] : vars[key];
     if (value === undefined) fail(`Unknown placeholder {${key}}.`);
     return String(value);
@@ -163,7 +180,7 @@ export async function startSandbox({ id, dir, commits, options, env: operatorEnv
         try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
       }
     }
-    const vars = { dir, id, slug };
+    const vars = { dir, id, slug, workspace };
     const errors = [];
     for (const command of config.teardown) {
       try { await exec(fill(command, vars), { cwd: dir, env: base, signal: new AbortController().signal, log }); } catch (error) { errors.push(error); }
@@ -194,7 +211,7 @@ export async function startSandbox({ id, dir, commits, options, env: operatorEnv
         await symlink(join(pin.repo, path), join(src, path));
       }
       const port = await freePort();
-      const vars = { port, dir, src, id, slug };
+      const vars = { port, dir, src, id, slug, workspace };
       urls[name] = `http://127.0.0.1:${port}`;
       const env = { ...base, PORT: String(port), HOST: '127.0.0.1', PROOF_ID: id };
       for (const [key, value] of Object.entries(service.env ?? {})) {

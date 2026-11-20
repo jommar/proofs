@@ -22,6 +22,11 @@ in the ticket's order. Write ACs from the ticket, not from the diff or the imple
 - The ticket has no testable ACs: do not invent them. Say so and ask the user for the criteria.
 - Flag up front any AC that cannot be automated; it will report as Uncovered.
 
+Mark each AC with what it needs from a target, so it is skipped where it cannot run instead of failing or writing
+where it must not: `"requires": ["db"]` for checks that read or seed a database directly, `"writes": true` for checks
+that create or change data, `"persona": "<name>"` for an AC that runs as another user. If the fixtures need specific
+data from the source database, declare it in `sourceRequires` (a read-only probe and/or recorded verdicts per source).
+
 ## Step 2: write the checks
 
 In `.proofs/<ID>/` (gitignored): `bdd/` Gherkin features and steps for what a user sees in a browser, `api/` Bruno
@@ -35,11 +40,22 @@ in the README). Never put credentials or customer data in a manifest, check or f
 
 From the directory your paths are relative to (or pass `--workspace <path>`):
 
-1. **Plan:** `node proofs/run.mjs <ID> <target> --plan` starts nothing and fails early on a bad manifest.
-2. **Check:** same command with `--check` prints `ready` or `NOT READY — <cause>`, to tell a broken environment from a failing AC.
+1. **Plan:** `node proofs/run.mjs <ID> <target> --plan` starts nothing, fails early on a bad manifest and lists every
+   `Problem:` and `Warning:` at once (logins, required profile fields, source qualification, dirty checkouts, links).
+   Fix all problems before going on.
+2. **Check:** same command with `--check` prints `ready`, `ready with warnings` or `NOT READY — <causes>`, to tell a
+   broken environment from a failing AC. `HTTP 401/403` means reachable but not logged in; the login is not verified.
 3. **Run:** drop the flag, then read `.proofs-out/<ID>/<run-id>/report.md`.
 
 Targets and flags:
+
+- `--target <profile>`: an environment named in `.proofs/targets.json` (urls, context, persona logins, capabilities,
+  data sources). Prefer it over spelling out `--url`/`--context`/`--login`; flags still override it. One session per
+  target (local, dev, UAT, live) runs the same command with a different `--target`. A profile field set to `null`
+  (for example the tenant) must be given with a flag; never guess it, ask the user.
+- `--persona <name>`: one persona per run. Run once per persona the ACs name; do not merge reports yourself.
+- `--source <name>`: pick a named data source for a local run. Read the `Source qualification` lines of `--plan`
+  first and choose one that qualifies instead of trying sources one by one.
 
 - `--worktree [app=]<dir>`: test one local checkout (its committed `HEAD`). Run it on the base and again on the feature branch, then compare. An AC that fails on base and passes on the feature is the good result; a pass on the base is valid, so do not manufacture a regression.
 - `--url [name=]<origin>`: test a running environment; nothing is started. `--context key=value` passes check inputs (such as a dummy tenant) and `--branch <label>` only labels the report.
@@ -92,7 +108,10 @@ Against a running environment (`--url`) there is no base: test the deployed buil
 ## Step 4: report
 
 Report each AC as **Pass**, **Fail**, **Blocked** (a fixture, login or response was missing: not a product failure),
-**Skipped** (filtered out by `--ac`), or **Uncovered** (no check). State which ACs have no checks; never call a ticket
+**Skipped** (filtered out by `--ac`), **Not applicable here** (the target lacks a capability, denies writes, or the run
+used another persona), or **Uncovered** (no check). Across targets, run `node proofs/run.mjs <ID> --summary`: it reads
+the ticket's durable `ledger.json` and prints the AC x target matrix (Before/After for base and feature) and a
+ticket comment with `Not verified on <target>` lines. Paste that, do not rebuild it by hand. State which ACs have no checks; never call a ticket
 proven on partial coverage. A report is evidence only for the run that produced it (including its `Duration:` phase
 breakdown). For a base-versus-feature comparison, use the table in the previous section.
 
@@ -117,6 +136,7 @@ If your agent runtime has subagents, split the independent work and keep the jud
 
 ## Safety
 
-Checks may create and change data on any target, but only on a dummy tenant the user names; never use a real
-customer's. Keep credentials out of manifests, reports, commits and messages. Stop any sandbox you start, and confirm
+Checks that create or change data must declare `"writes": true`; they then run only where the target profile
+allows writes (local profiles do by default). The guard skips whole ACs; steps are trusted code, so an undeclared write
+still writes. Use only a dummy tenant the user names; never a real customer's. A data source is only ever read. Keep credentials out of manifests, reports, commits and messages. Stop any sandbox you start, and confirm
 no scratch databases or processes remain.

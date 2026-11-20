@@ -74,7 +74,7 @@ test('parseReportMarkdown extracts digest, duration fallback, filtered ACs, esca
   assert.deepEqual(parsed.selectedAcs, ['AC1', 'AC2']);
   assert.equal(parsed.durationMs, 12500);
   assert.deepEqual(parsed.timings, { durationMs: 12500, startupMs: 2000, teardownMs: 500, adapters: { bdd: 7500, perf: 2500 } });
-  assert.deepEqual(parsed.counts, { pass: 2, fail: 1, blocked: 1, skipped: 1, uncovered: 1, unknown: 0, total: 6 });
+  assert.deepEqual(parsed.counts, { pass: 2, fail: 1, blocked: 1, skipped: 1, uncovered: 1, na: 0, unknown: 0, total: 6 });
   assert.equal(parsed.acs[0].id, 'AC1');
   assert.equal(parsed.acs[0].claim, 'Escaped | pipe *star* [b] & <tag> — with dash');
   assert.equal(parsed.acs[0].status, 'pass');
