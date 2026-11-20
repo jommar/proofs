@@ -453,7 +453,7 @@ async function runtimePreflight(input, options) {
 
 const formatCheck = (issues, warnings, build) => [
   issues.length ? `NOT READY — ${issues.join(' ')}` : warnings.length ? 'ready with warnings' : 'ready',
-  ...(build !== undefined ? [`Build: ${build ?? 'build not detected'}`] : []),
+  ...(build !== undefined ? [`Build: ${build ?? 'not detected (the version endpoint gave no usable value)'}`] : []),
   ...(warnings.length ? ['Warnings:', ...warnings.map(text => `- ${text}`)] : []),
 ].join('\n');
 

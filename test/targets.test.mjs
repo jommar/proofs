@@ -192,7 +192,7 @@ test('named sources: default, --source, the raw override and passwords that neve
   assert.match(report, /Source: `good` `mysql:\/\/127\.0\.0\.1:3317\/seed_good` \(profile default\)/);
   assert.match(report, /Recorded `SAFE_LABEL`: `build-42`/);
   assert.match(report, /Recorded `PROOF_FROM`: withheld/);
-  assert.match(report, /Build: build not detected/);
+  assert.match(report, /^- Build: not looked up \(the target profile names no `version` endpoint; normal for a local checkout, whose commits are listed under Revisions\)$/m);
   assert.match(report, /redacted local credential/);
 
   const picked = await go(['--source', 'bad']);
@@ -338,6 +338,15 @@ test('build detection records the build and --expect-commit blocks a run on anot
   const report = await readFile(other.reportPath, 'utf8');
   assert.match(report, /build does not match --expect-commit 1234567/);
   assert.match(resultCell(report, 'AC1'), /^Blocked/);
+
+  // A version endpoint that gives no usable value is "not detected"; with no endpoint nothing is looked up.
+  profiles.targets.blind = { ...profiles.targets.stage, version: { url: 'app', path: '/other', field: 'build.commit' } };
+  await writeFile(join(root, '.proofs', 'targets.json'), JSON.stringify(profiles));
+  assert.match((await run([ticket, '--target', 'blind', '--check'], { workspace: root, parentEnv: env })).check, /^Build: not detected \(the version endpoint gave no usable value\)$/m);
+  const blind = await run([ticket, '--target', 'blind'], { workspace: root, parentEnv: env, invoke: pass() });
+  assert.match(await readFile(blind.reportPath, 'utf8'), /^- Build: not detected \(`app` `\/other` gave no usable version value\)$/m);
+  const bare = await run([ticket, '--url', profiles.targets.stage.urls.app], { workspace: root, parentEnv: env, invoke: pass() });
+  assert.match(await readFile(bare.reportPath, 'utf8'), /^- Build: not looked up \(the target profile names no `version` endpoint; the served revision is not recorded\)$/m);
 });
 
 test('--summary merges the durable ledger into an AC x target matrix with Before/After and survives index pruning', async t => {

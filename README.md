@@ -130,7 +130,7 @@ A profile file names each environment once. It lives at `.proofs/targets.json` b
 - **`login`, `personas`, `defaultPersona`:** variable names only. `--persona <name>` (or `PROOF_PERSONA` in the environment) picks one; an empty persona (`{}`) reuses the profile's login. The persona name reaches the checks and the runtime as `PROOF_PERSONA`, and the profile name as `PROOF_TARGET_NAME`.
 - **`capabilities`:** names mapped to true or false. Anything not listed is false, except `writes`, which defaults to true for a local profile and false for one with `urls`.
 - **`sources`, `defaultSource`, `sourceEnv`:** see [Data sources](#data-sources).
-- **`version`:** where the build says what it is: an origin name, a path and optionally a JSON field. How a build exposes its version is app-specific. The detected value is recorded in the report (`Build:`), or `build not detected`; `--expect-commit <sha>` blocks a run when the build does not name that commit (for `--worktree`, when the checkout neither is nor contains it).
+- **`version`:** where the build says what it is: an origin name, a path and optionally a JSON field. How a build exposes its version is app-specific. The detected value is recorded in the report (`Build:`), or `not detected` when the endpoint gives no usable value. Without a `version` the report says `not looked up`: nothing was looked for, which is normal for a local checkout (its commits are under Revisions); `--expect-commit <sha>` blocks a run when the build does not name that commit (for `--worktree`, when the checkout neither is nor contains it).
 
 The profile name, persona and inputs are recorded in every report and `runs.json` entry. Runs without `--target` behave exactly as before.
 
