@@ -221,6 +221,23 @@ test('named sources: default, --source, the raw override and passwords that neve
   }
 });
 
+test('a secret that is a common word is scrubbed from observed text but never from the harness\'s own lines', async t => {
+  const { root, repo } = await workspace(t);
+  const WORD = 'local';
+  const env = { PATH: process.env.PATH, ...LOGIN, SRC_PW: WORD };
+  const result = await run([ticket, '--target', 'local', '--worktree', `app=${repo}`, '--runtime', 'runtime.mjs'], {
+    workspace: root, parentEnv: env, ...fakeSandbox([]),
+    invoke: async ({ env: e }) => {
+      await writeFile(e.PROOF_RESULTS, `${JSON.stringify({ ac: 'AC1', status: 'pass', observed: `leaked ${WORD}` })}\n`);
+      return 0;
+    },
+  });
+  const report = await readFile(result.reportPath, 'utf8');
+  assert.match(report, /Mode: local checkout/, 'the mode line stays readable');
+  assert.match(report, /Target profile: `local`/, 'the profile name stays readable');
+  assert.ok(!report.includes(`leaked ${WORD}`), 'the observed text is still scrubbed');
+});
+
 test('source qualification lists every source with its verdict in one pass, from a probe or a recorded verdict', async t => {
   const { root, repo, dir, save } = await workspace(t);
   await mkdir(join(dir, 'setup'));
