@@ -114,10 +114,11 @@ function exportCommit(repo, sha, src, { cwd, env, signal, log }) {
   });
 }
 
-async function waitReady(url, child, signal, timeoutMs) {
+async function waitReady(url, child, signal, timeoutMs, getSpawnError = () => undefined) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     signal.throwIfAborted();
+    if (getSpawnError()) fail('could not start process');
     if (child.exitCode !== null) fail(`exited with code ${child.exitCode} before it became ready`);
     try {
       // Any HTTP answer below 500 means the server is listening; a 401 or 404 is fine.
@@ -149,7 +150,7 @@ export async function startSandbox({ id, dir, commits, options, env: operatorEnv
   });
 
   async function close() {
-    const running = started.splice(0).reverse();
+    const running = started.splice(0).reverse().filter(child => child.pid);
     for (const child of running) {
       try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already gone */ }
     }
@@ -182,7 +183,7 @@ export async function startSandbox({ id, dir, commits, options, env: operatorEnv
       };
       const app = service.app ?? name;
       const pin = commits[app] ?? fail(`${name}: the manifest has no app "${app}".`);
-      const src = join(dir, 'src', app);
+      const src = join(dir, 'src', name);
       await mkdir(src, { recursive: true, mode: 0o700 });
       await step('exporting the pinned commit', () => exportCommit(pin.repo, pin.sha, src, {
         cwd: dir, signal, log,
@@ -204,8 +205,10 @@ export async function startSandbox({ id, dir, commits, options, env: operatorEnv
         await step(`setup command ${index + 1}`, () => exec(fill(command, vars), { cwd: src, env, signal, log }));
       }
       const child = spawn('sh', ['-c', fill(service.start, vars)], { cwd: src, env, detached: true, stdio: ['ignore', log, log] });
+      let spawnError;
+      child.once('error', err => { spawnError = err; });
       started.push(child);
-      await step('start', () => waitReady(`${urls[name]}${service.ready ?? '/'}`, child, signal, (service.readySeconds ?? READY_TIMEOUT_MS / 1000) * 1000));
+      await step('start', () => waitReady(`${urls[name]}${service.ready ?? '/'}`, child, signal, (service.readySeconds ?? READY_TIMEOUT_MS / 1000) * 1000, () => spawnError));
     }
   } catch (error) {
     let closeError;

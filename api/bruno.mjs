@@ -6,6 +6,8 @@ const template = /\{\{\s*([A-Za-z_][\w.]*)\s*\}\}/g;
 const responsePath = /^res\.(?:status|body(?:\.[A-Za-z0-9_$-]+|\[\d+\])*|headers\.[A-Za-z0-9_-]+)$/;
 const headerName = /^[!#$%&'*+\-.^_`|~0-9a-z]+$/;
 const forbiddenHeaders = /^(?:authorization|cookie|host|content-length|connection|transfer-encoding|upgrade|expect|trailer|te|keep-alive|proxy-.*)$/;
+const sensitiveCaptureHeaders = /^(?:set-cookie|authorization|cookie|proxy-authorization|www-authenticate)$/;
+const MAX_REGEX_LENGTH = 256;
 
 function parseAssertion({ name, value }) {
   if (!responsePath.test(name)) throw new Error('Unsupported assertion subject');
@@ -13,10 +15,19 @@ function parseAssertion({ name, value }) {
   if (['isDefined', 'isUndefined', 'isNull'].includes(operator) && operand === undefined) {
     return { name, operator };
   }
-  if (!['eq', 'neq', 'length'].includes(operator) || operand === undefined) throw new Error('Unsupported assertion');
+  if (!['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'length', 'contains', 'matches'].includes(operator) || operand === undefined) {
+    throw new Error('Unsupported assertion');
+  }
   let expected;
   try { expected = JSON.parse(operand); } catch { expected = operand; }
   if (expected !== null && typeof expected === 'object') throw new Error('Unsupported assertion operand');
+  if (operator === 'matches') {
+    if (typeof expected !== 'string' || !expected.length || expected.length > MAX_REGEX_LENGTH) throw new Error('Unsupported regex operand');
+    if (!template.test(expected)) {
+      try { new RegExp(expected); } catch { throw new Error('Invalid regex operand'); }
+    }
+    template.lastIndex = 0;
+  }
   return { name, operator, expected };
 }
 
@@ -54,10 +65,12 @@ export function parseRequest(parse, source, expectAuthRejection = false) {
   if (!assertions.length) throw new Error('A proof needs an enabled assertion');
 
   const captures = (bru.vars?.res ?? []).filter(({ enabled }) => enabled);
-  if (captures.some(({ name, value, local }) => local || !/^[A-Za-z][\w]*$/.test(name) ||
-      name.startsWith('PROOF_') || name === 'runId' ||
-      !value.startsWith('res.body.') || !responsePath.test(value)) ||
-      new Set(captures.map(({ name }) => name)).size !== captures.length) {
+  if (captures.some(({ name, value, local }) => {
+    if (local || !/^[A-Za-z][\w]*$/.test(name) || name.startsWith('PROOF_') || name === 'runId' || !responsePath.test(value)) return true;
+    if (value.startsWith('res.body.') || value.startsWith('res.body[')) return false;
+    if (value.startsWith('res.headers.')) return sensitiveCaptureHeaders.test(value.slice(12).toLowerCase());
+    return true;
+  }) || new Set(captures.map(({ name }) => name)).size !== captures.length) {
     throw new Error('Unsupported response variable');
   }
   const first = assertions[0];
@@ -136,6 +149,16 @@ export function check(response, { name, operator, expected }) {
     case 'isNull': return value === null;
     case 'eq': return value !== undefined && value === expected;
     case 'neq': return value !== undefined && value !== expected;
+    case 'gt': return typeof value === 'number' && typeof expected === 'number' && Number.isFinite(value) && Number.isFinite(expected) && value > expected;
+    case 'gte': return typeof value === 'number' && typeof expected === 'number' && Number.isFinite(value) && Number.isFinite(expected) && value >= expected;
+    case 'lt': return typeof value === 'number' && typeof expected === 'number' && Number.isFinite(value) && Number.isFinite(expected) && value < expected;
+    case 'lte': return typeof value === 'number' && typeof expected === 'number' && Number.isFinite(value) && Number.isFinite(expected) && value <= expected;
     case 'length': return (Array.isArray(value) || typeof value === 'string') && value.length === expected;
+    case 'contains':
+      if (typeof value === 'string') return typeof expected === 'string' && value.includes(expected);
+      return Array.isArray(value) && value.includes(expected);
+    case 'matches':
+      if (typeof value !== 'string' || typeof expected !== 'string' || !expected.length || expected.length > MAX_REGEX_LENGTH) return false;
+      try { return new RegExp(expected).test(value); } catch { return false; }
   }
 }

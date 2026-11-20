@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { writeDashboard } from '../lib/dashboard.mjs';
 import { recordRun, unindexedRunDirs } from '../lib/runs.mjs';
+import { unlockProofInputs } from '../lib/snapshot.mjs';
 import { run } from '../run.mjs';
 
 const ticket = 'ACME-1';
@@ -858,10 +860,17 @@ test('a ticket in the harness\'s own .proofs/ is found first, and its report goe
   const inputs = join(harness, '.proofs', id);
   const outputs = join(harness, '.proofs-out', id);
   const index = join(harness, '.proofs-out', 'runs.json');
+  const dashboard = join(harness, '.proofs-out', 'dashboard.html');
   const forgetRuns = async () => {
     const runs = JSON.parse(await readFile(index, 'utf8').catch(() => '{}'));
     delete runs[id];
-    await (Object.keys(runs).length ? writeFile(index, JSON.stringify(runs, null, 2)) : rm(index, { force: true }));
+    if (Object.keys(runs).length) {
+      await writeFile(index, JSON.stringify(runs, null, 2));
+      await writeDashboard(join(harness, '.proofs-out')).catch(() => {});
+    } else {
+      await rm(index, { force: true });
+      await rm(dashboard, { force: true });
+    }
   };
   t.after(() => Promise.all([rm(inputs, { recursive: true, force: true }), rm(outputs, { recursive: true, force: true }), forgetRuns()]));
   await mkdir(join(inputs, 'api'), { recursive: true });
@@ -1034,4 +1043,56 @@ test('--serve keeps the local sandbox running until aborted and prints iterate c
   assert.match(observedReady.message, /Sandbox ready for ACME-1/);
   assert.match(observedReady.message, /Iterate with: node proofs\/run\.mjs ACME-1 --url app=http:\/\/127\.0\.0\.1:\d+/);
   assert.deepEqual(await readdir(join(root, '.proofs-out', ticket)), [], 'clean --serve exit leaves no leftover run dir');
+});
+
+test('cleanup failure re-renders report.md with the issue and sets exitCode to 1', async t => {
+  const { root } = await workspace(t);
+  await adapter(root);
+  const outcome = await run([ticket, '--url', 'https://trips.example.test'], {
+    workspace: root,
+    parentEnv: { PATH: process.env.PATH },
+    invoke: async ({ env }) => { await writeResults(env.PROOF_RESULTS, [result()]); return 0; },
+    cleanup: async scratch => { await unlockProofInputs(scratch); throw new Error('EACCES simulated cleanup failure'); },
+  });
+  assert.equal(outcome.exitCode, 1);
+  const report = await readFile(outcome.reportPath, 'utf8');
+  assert.match(report, /Private run files could not be removed; check the run directory\./);
+  assert.match(report, /Blocked — see run issues below/);
+  const runs = JSON.parse(await readFile(join(root, '.proofs-out', 'runs.json'), 'utf8'));
+  assert.equal(Object.values(runs[ticket])[0].exitCode, 1);
+});
+
+test('CLI --login overrides manifest.runtimeOptions.login in --worktree mode', async t => {
+  const { root, manifest, save } = await workspace(t);
+  builtIn(manifest, { app: { app: names[0], start: SERVER } });
+  manifest.runtimeOptions.login = { usernameEnv: 'MANIFEST_USER', passwordEnv: 'MANIFEST_PASS' };
+  await save();
+  await adapter(root);
+  let seen;
+  const outcome = await run([ticket, '--worktree', names[0], '--login', 'CLI_USER,CLI_PASS'], {
+    workspace: root,
+    parentEnv: { PATH: process.env.PATH, MANIFEST_USER: 'old', MANIFEST_PASS: 'oldp', CLI_USER: 'fresh', CLI_PASS: 'freshp' },
+    invoke: async ({ env }) => {
+      seen = [env.PROOF_USERNAME, env.PROOF_PASSWORD];
+      await writeResults(env.PROOF_RESULTS, [result()]);
+      return 0;
+    },
+  });
+  assert.equal(outcome.exitCode, 0);
+  assert.deepEqual(seen, ['fresh', 'freshp']);
+});
+
+test('recordRun automatically recovers a stale .runs.lock left by a killed process', async t => {
+  const out = await mkdtemp(join(tmpdir(), 'proof-stale-lock-'));
+  t.after(() => rm(out, { recursive: true, force: true }));
+  const lock = join(out, '.runs.lock');
+  await mkdir(lock, { mode: 0o700 });
+  const stale = new Date(Date.now() - 60_000);
+  await utimes(lock, stale, stale);
+  const t0 = Date.now();
+  await recordRun(out, 'T-STALE', 'run-1', { startedAt: new Date().toISOString() });
+  assert.ok(Date.now() - t0 < 1500, 'stale lock recovered without waiting out retries');
+  const index = JSON.parse(await readFile(join(out, 'runs.json'), 'utf8'));
+  assert.ok(index['T-STALE']['run-1']);
+  assert.ok(!(await readdir(out)).includes('.runs.lock'));
 });

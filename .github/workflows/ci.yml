@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install adapter dependencies
+        run: |
+          npm --prefix api ci
+          npm --prefix bdd ci
+
+      - name: Install Playwright Chromium
+        run: npx --prefix bdd playwright install chromium --with-deps
+
+      - name: Run harness self-tests
+        run: node --test test/*.test.mjs api/run.test.mjs bdd/selftest.mjs
+
+      - name: Run built-in end-to-end demo
+        run: node examples/built-in-demo.mjs

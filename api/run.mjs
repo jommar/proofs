@@ -204,7 +204,8 @@ async function run(ticket, manifest, env, diagFile) {
   if (selectedAcs && !specs.length) return [];
   let parser;
   try {
-    if (require('@usebruno/lang/package.json').version !== '0.36.0') throw new Error();
+    const expectedVersion = require('./package.json').dependencies?.['@usebruno/lang'];
+    if (!expectedVersion || require('@usebruno/lang/package.json').version !== expectedVersion) throw new Error();
     parser = require('@usebruno/lang').bruToJsonV2;
   } catch {
     return blocked(specs, 'Pinned Bruno parser not installed: run npm --prefix api ci from the harness root');

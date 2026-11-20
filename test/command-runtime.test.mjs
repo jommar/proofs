@@ -141,3 +141,31 @@ test('close stops multiple services in parallel and startup rollback failure sur
   });
   await assert.rejects(failing, error => error instanceof AggregateError && error.proofSafe === true && /setup command 1 failed/.test(error.message));
 });
+
+test('multiple services sharing one app get isolated export trees and non-colliding links', async t => {
+  const { root, repo, commits } = await fixture(t);
+  await mkdir(join(repo, 'node_modules'));
+  await writeFile(join(repo, 'node_modules', 'shared.txt'), 'ok');
+  const readTag = "const fs = require('node:fs'); require('node:http').createServer((q, s) => s.end(fs.readFileSync('tag.txt', 'utf8') + ':' + fs.readFileSync('node_modules/shared.txt', 'utf8'))).listen(Number(process.env.PORT), '127.0.0.1');";
+  const options = {
+    services: {
+      alpha: { app: 'app', link: ['node_modules'], setup: ['printf alpha > tag.txt'], start: `node -e ${JSON.stringify(readTag)}` },
+      beta: { app: 'app', link: ['node_modules'], setup: ['printf beta > tag.txt'], start: `node -e ${JSON.stringify(readTag)}` },
+    },
+  };
+  const sandbox = await startSandbox({ id: 'proof-multi', dir: join(root, 'multi'), commits: { app: { repo, sha: commits[0] } }, options, signal: new AbortController().signal });
+  assert.equal(await body(sandbox.env.PROOF_ALPHA_URL), 'alpha:ok');
+  assert.equal(await body(sandbox.env.PROOF_BETA_URL), 'beta:ok');
+  await sandbox.close();
+});
+
+test('a spawn error on service start rejects cleanly instead of crashing with an unhandled error event', async t => {
+  const { root, repo, commits } = await fixture(t);
+  const options = {
+    services: { app: { env: { PATH: '/nonexistent-proofs-bin' }, start: 'node server.js', readySeconds: 2 } },
+  };
+  await assert.rejects(
+    startSandbox({ id: 'proof-spawn', dir: join(root, 'spawn'), commits: { app: { repo, sha: commits[0] } }, options, signal: new AbortController().signal }),
+    error => error.proofSafe === true && /app: start failed/.test(error.message),
+  );
+});

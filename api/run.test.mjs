@@ -337,3 +337,43 @@ test('PROOF_ACS filters Bruno requests while keeping prerequisites and writes fa
   const diagLog = await readFile(join(diagDir, 'api.log'), 'utf8');
   assert.match(diagLog, /\[flow\/03-ac2\.bru\] fail:/);
 });
+
+test('supports numeric inequalities, contains, regex matches, array-root and non-secret header captures, and rejects secret header captures', async t => {
+  const proof = await fixture(t, [
+    {
+      path: 'ops', auth: 'none', requests: {
+        '01-list.bru': { role: 'prerequisite' },
+        '02-item.bru': { ac: 'AC1' },
+      },
+      files: {
+        '01-list.bru': bru({
+          seq: 1, path: '/items',
+          assertions: 'res.status: eq 200\n  res.body[0].count: gt 2\n  res.body[0].count: gte 3\n  res.body[0].count: lt 5\n  res.body[0].count: lte 3',
+          extra: 'vars:post-response {\n  firstId: res.body[0].id\n  reqId: res.headers.x-request-id\n}',
+        }),
+        '02-item.bru': bru({
+          seq: 2, path: '/items/{{firstId}}?req={{reqId}}',
+          assertions: 'res.status: eq 200\n  res.body.summary: contains active\n  res.body.tags: contains priority\n  res.body.code: matches ^ORD-[0-9]{3}$',
+        }),
+      },
+    },
+    {
+      path: 'bad-header', auth: 'none', requests: { 'secret.bru': { ac: 'AC2' } },
+      files: {
+        'secret.bru': bru({ seq: 1, path: '/items', extra: 'vars:post-response {\n  tok: res.headers.set-cookie\n}' }),
+      },
+    },
+    {
+      path: 'bad-regex', auth: 'none', requests: { 'regex.bru': { ac: 'AC3' } },
+      files: {
+        'regex.bru': bru({ seq: 1, path: '/items', assertions: 'res.status: eq 200\n  res.body.code: matches [unclosed' }),
+      },
+    },
+  ]);
+  const service = await fake(t, call => call.path === '/items'
+    ? { headers: { 'x-request-id': 'req-42' }, body: [{ id: 'it-9', count: 3 }] }
+    : { body: { summary: 'order is active', tags: ['standard', 'priority'], code: 'ORD-108' } });
+  const { rows } = await proof.run('extended', { PROOF_CATALOG2_URL: service.origin });
+  assert.deepEqual(verdicts(rows), [['AC1', 'pass'], ['AC2', 'blocked'], ['AC3', 'blocked']]);
+  assert.deepEqual(service.calls.map(c => c.path), ['/items', '/items/it-9?req=req-42']);
+});

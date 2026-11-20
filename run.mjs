@@ -7,6 +7,7 @@ import { chmod, copyFile, lstat, mkdir, readdir, realpath, rm, stat, writeFile }
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { writeDashboard } from './lib/dashboard.mjs';
 import { formatPlan, makeReport, readEvidence } from './lib/evidence.mjs';
 import { record, resolveInputs } from './lib/inputs.mjs';
 import { localOrigin, proofContextKey, proofUrlKey } from './lib/origins.mjs';
@@ -419,7 +420,7 @@ async function runPhases(input, snapshot, id, scratch, options) {
 
 export async function run(args, {
   workspace = process.cwd(), parentEnv = process.env, signal = new AbortController().signal,
-  captureDataset, startSandbox, invoke = invokeChild, adapterTimeoutMs = ADAPTER_TIMEOUT_MS, onReady,
+  captureDataset, startSandbox, invoke = invokeChild, adapterTimeoutMs = ADAPTER_TIMEOUT_MS, onReady, cleanup = cleanupScratch,
 } = {}) {
   const input = await resolveInputs(args, workspace, parentEnv);
   const snapshot = await readProofInputs(input);
@@ -460,15 +461,17 @@ export async function run(args, {
     };
   }
 
-  const { report, exitCode } = makeReport(input, id, phases);
+  let { report, exitCode } = makeReport(input, id, phases);
   let diagnosticsDir;
   if (exitCode !== 0 || input.debug || phases.run.issues.length > 0) {
     diagnosticsDir = await collectDiagnostics(scratch, runDir, 'run');
   }
   try {
-    await cleanupScratch(scratch, phases);
+    await cleanup(scratch, phases);
   } catch {
     phases.run.issues.push('Private run files could not be removed; check the run directory.');
+    if (!diagnosticsDir) diagnosticsDir = await collectDiagnostics(scratch, runDir, 'run');
+    ({ report, exitCode } = makeReport(input, id, phases));
   }
   const reportPath = join(runDir, 'report.md');
   await writeFile(reportPath, report, { flag: 'wx', mode: 0o600 });
@@ -477,7 +480,21 @@ export async function run(args, {
     startedAt, exitCode, reportPath, durationMs, timings: phases.run.timings,
   }))
     .then(() => undefined, () => 'Run was not added to .proofs-out/runs.json.');
-  return { exitCode, reportPath, runsWarning, ...(diagnosticsDir ? { diagnosticsDir } : {}) };
+  let dashboardPath;
+  let dashboardWarning;
+  if (!runsWarning) {
+    try {
+      ({ path: dashboardPath } = await writeDashboard(out));
+    } catch {
+      dashboardWarning = 'Dashboard .proofs-out/dashboard.html could not be updated.';
+    }
+  }
+  return {
+    exitCode, reportPath, runsWarning,
+    ...(dashboardPath ? { dashboardPath } : {}),
+    ...(dashboardWarning ? { dashboardWarning } : {}),
+    ...(diagnosticsDir ? { diagnosticsDir } : {}),
+  };
 }
 
 async function main() {
@@ -496,6 +513,7 @@ async function main() {
     }
     if (result.diagnosticsDir) console.error(`Diagnostics: ${result.diagnosticsDir}`);
     if (result.runsWarning) console.error(result.runsWarning);
+    if (result.dashboardWarning) console.error(result.dashboardWarning);
     process.exitCode = result.exitCode;
   } catch (error) {
     // Native filesystem errors can contain arbitrary input paths; do not forward them.

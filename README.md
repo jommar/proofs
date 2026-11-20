@@ -169,12 +169,13 @@ To compare a base and a feature, run the same ticket on each checkout and compar
 | Path | Purpose |
 | --- | --- |
 | `run.mjs` | Main CLI entry point (`--worktree`, `--url`, `--plan`, `--check`, `--serve`, `--only`, `--ac`, `--debug`). |
-| `lib/` | Argument parsing (`inputs.mjs`), input snapshot/digest (`snapshot.mjs`), origin validation (`origins.mjs`), evidence/report rendering (`evidence.mjs`), `runs.json` index (`runs.mjs`). |
+| `lib/` | Argument parsing (`inputs.mjs`), input snapshot/digest (`snapshot.mjs`), origin validation (`origins.mjs`), evidence/report rendering (`evidence.mjs`), `runs.json` index (`runs.mjs`), self-contained HTML dashboard (`dashboard.mjs`). |
 | `runtime/` | Built-in local process runtime (`command.mjs`) — see [`runtime/README.md`](runtime/README.md). |
 | `bdd/` | Gherkin + Playwright browser adapter (`run.mjs`, `fixtures.mjs`, `loopback.mjs`, `reporter.mjs`) — see [`bdd/README.md`](bdd/README.md). |
 | `api/` | Declarative Bruno HTTP adapter (`run.mjs`) — see [`api/README.md`](api/README.md). |
-| `test/` | Harness unit/integration tests (`runner.test.mjs`, `command-runtime.test.mjs`). |
+| `test/` | Harness unit/integration tests (`runner.test.mjs`, `command-runtime.test.mjs`, `dashboard.test.mjs`). |
 | `examples/` | Self-contained end-to-end demo (`built-in-demo.mjs`). |
+| `dashboard.mjs` | Rebuilds the offline `.proofs-out/dashboard.html` dashboard from `runs.json` and redacted `report.md` files (also auto-updated after each run). |
 | `prune.mjs` | Cleans unindexed run folders from `.proofs-out/` (`--yes` to delete). |
 
 ## License
