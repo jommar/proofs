@@ -322,3 +322,106 @@ test('run.mjs auto-generates dashboard.html and dashboard.mjs CLI handles valid 
   const emptyHtml = renderDashboardHtml({ generatedAt: '2026-11-20T00:00:00.000Z', ticketCount: 0, runCount: 0, tickets: [], runs: [] });
   assert.match(emptyHtml, /<title>Proofs Dashboard<\/title>/);
 });
+
+test('collectDashboardData resolves Base vs Feature via Git ancestry regardless of run order, sanitizes branches, and skips partial/debug noise', async t => {
+  const out = await privateTmpDir(t, 'proof-dash-ancestry-');
+  const repoDir = await privateTmpDir(t, 'proof-dash-repo-');
+  const ticket = 'ANC-1';
+  const featId = '11111111-1111-4111-8111-111111111111';
+  const baseId = '22222222-2222-4222-8222-222222222222';
+  const debugId = '33333333-3333-4333-8333-333333333333';
+
+  for (const id of [featId, baseId, debugId]) {
+    await mkdir(join(out, ticket, id), { recursive: true, mode: 0o700 });
+  }
+  await writeFile(join(out, ticket, featId, 'report.md'), [
+    '# Proof report — ANC-1',
+    'Proof inputs digest: `sha256:deadbeef`',
+    '| AC | Result |',
+    '| --- | --- |',
+    '| AC1 — New feature works | Pass — bdd: pass — ok=true |',
+    '| AC2 — Existing holds | Pass — bdd: pass — ok=true |',
+  ].join('\n'), { mode: 0o600 });
+  await writeFile(join(out, ticket, baseId, 'report.md'), [
+    '# Proof report — ANC-1',
+    'Proof inputs digest: `sha256:deadbeef`',
+    '| AC | Result |',
+    '| --- | --- |',
+    '| AC1 — New feature works | Fail — bdd: fail — ok=false |',
+    '| AC2 — Existing holds | Pass — bdd: pass — ok=true |',
+  ].join('\n'), { mode: 0o600 });
+  await writeFile(join(out, ticket, debugId, 'report.md'), [
+    '# Proof report — ANC-1',
+    'Filtered ACs: `AC1` (partial run)',
+    '| AC | Result |',
+    '| --- | --- |',
+    '| AC1 — New feature works | Fail — bdd: fail — ok=false |',
+    '| AC2 — Existing holds | Skipped — filtered out by --ac |',
+  ].join('\n'), { mode: 0o600 });
+
+  const baseSha = 'aaaaaaa111111111111111111111111111111111';
+  const featSha = 'bbbbbbb222222222222222222222222222222222';
+  const sharedSha = 'ccccccc333333333333333333333333333333333';
+
+  // Feature ran first, Base ran second, debug/partial ran third (newest).
+  await writeFile(join(out, 'runs.json'), JSON.stringify({
+    [ticket]: {
+      [featId]: {
+        startedAt: '2026-11-20T10:00:00.000Z',
+        exitCode: 0,
+        type: 'worktree',
+        args: [ticket, '--worktree', `api=${repoDir}`, '--worktree', `shared=${repoDir}`],
+        worktrees: [
+          { app: 'shared', sha: sharedSha, dirty: false, branch: '../escape-attempt' },
+          { app: 'api', sha: featSha, dirty: false },
+        ],
+      },
+      [baseId]: {
+        startedAt: '2026-11-20T10:05:00.000Z',
+        exitCode: 1,
+        type: 'worktree',
+        args: [ticket, '--worktree', `api=${repoDir}`, '--worktree', `shared=${repoDir}`],
+        worktrees: [
+          { app: 'shared', sha: sharedSha, dirty: false },
+          { app: 'api', sha: baseSha, dirty: false, branch: 'main' },
+        ],
+      },
+      [debugId]: {
+        startedAt: '2026-11-20T10:10:00.000Z',
+        exitCode: 1,
+        debug: true,
+        selectedAcs: ['AC1'],
+        type: 'url',
+        urls: { PROOF_APP_URL: 'http://127.0.0.1:9999' },
+      },
+    },
+  }, null, 2), { mode: 0o600 });
+
+  const data = await collectDashboardData(out, {
+    isAncestor: (_repo, ancestor, commit) => ancestor === baseSha && commit === featSha,
+    resolveBranch: (_repo, sha) => (sha === featSha ? 'feat/anc-1' : null),
+  });
+
+  const tInfo = data.tickets.find(entry => entry.ticket === ticket);
+  assert.equal(tInfo.primaryRunId, featId, 'feature run should drive ticket status even when base ran later');
+  assert.equal(tInfo.primaryStatus, 'pass');
+  assert.deepEqual(tInfo.comparePair, { baseId, featureId: featId, source: 'git' });
+  assert.deepEqual(tInfo.verdictCounts, { delivered: 1, holds: 1, notMet: 0, regression: 0, skipped: 0, other: 0, total: 2 });
+  assert.equal(tInfo.completeCount, 2);
+  assert.equal(tInfo.noisyCount, 1);
+
+  const featRun = data.runs.find(r => r.id === featId);
+  const baseRun = data.runs.find(r => r.id === baseId);
+  const dbgRun = data.runs.find(r => r.id === debugId);
+  assert.equal(featRun.role, 'feature');
+  assert.equal(baseRun.role, 'base');
+  assert.equal(dbgRun.role, null);
+  assert.equal(dbgRun.complete, false);
+  assert.equal(featRun.worktrees.find(w => w.app === 'api').branch, 'feat/anc-1');
+  assert.equal(featRun.worktrees.find(w => w.app === 'shared').branch, undefined, 'unsafe branch names must be dropped');
+  assert.equal(baseRun.worktrees.find(w => w.app === 'api').branch, 'main');
+
+  // Ensure the local repo path used for git ancestry never leaks into rendered HTML.
+  const html = renderDashboardHtml(data);
+  assert.doesNotMatch(html, new RegExp(repoDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
