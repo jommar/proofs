@@ -1,4 +1,5 @@
 import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 export const acTag = /^@AC[1-9]\d*$/;
 export const blockRow = reason => ({ status: 'blocked', observed: { reason } });
@@ -27,12 +28,16 @@ function withCriteria(test, rows) {
 
 export default class EvidenceReporter {
   rows = [];
+  diagnostics = [];
   completed = new Set();
   fatal = false;
 
   onBegin(_config, suite) { this.expected = suite.allTests(); }
 
-  onError() { this.fatal = true; }
+  onError(error) {
+    this.fatal = true;
+    this.diagnostics.push({ kind: 'fatal', message: error?.message ?? String(error), stack: error?.stack });
+  }
 
   onTestEnd(test, result) {
     this.completed.add(test.id);
@@ -51,14 +56,38 @@ export default class EvidenceReporter {
     else if (result.status === 'passed' && evidence.length) rows = evidence;
     else rows = [blockRow(result.status === 'passed' ? 'no_explicit_check' : 'scenario_incomplete')];
     this.rows.push(...withCriteria(test, rows));
+    if (process.env.PROOF_DIAGNOSTICS_DIR && (result.status !== 'passed' || blocked || failed || process.env.PROOF_DEBUG === '1')) {
+      this.diagnostics.push({
+        title: test.title,
+        tags: test.tags,
+        status: result.status,
+        durationMs: result.duration,
+        outcome: rows,
+        errors: (result.errors ?? []).map(error => ({ message: error?.message ?? String(error), stack: error?.stack })),
+      });
+    }
   }
 
   onEnd({ status }) {
     const expected = this.expected ?? [];
     const missing = expected.filter(test => !this.completed.has(test.id));
     const complete = !this.fatal && missing.length === 0 && ['passed', 'failed'].includes(status);
-    for (const test of missing) this.rows.push(...withCriteria(test, [blockRow('scenario_not_run')]));
+    for (const test of missing) {
+      this.rows.push(...withCriteria(test, [blockRow('scenario_not_run')]));
+      if (process.env.PROOF_DIAGNOSTICS_DIR) {
+        this.diagnostics.push({ title: test.title, tags: test.tags, status: 'not_run' });
+      }
+    }
     writeFileSync(process.env.PROOF_BDD_EVIDENCE, JSON.stringify({ complete, status, rows: this.rows }), { mode: 0o600 });
+    if (process.env.PROOF_DIAGNOSTICS_DIR && this.diagnostics.length) {
+      try {
+        writeFileSync(
+          join(process.env.PROOF_DIAGNOSTICS_DIR, 'bdd-failures.json'),
+          `${JSON.stringify({ status, complete, entries: this.diagnostics }, null, 2)}\n`,
+          { mode: 0o600 },
+        );
+      } catch { /* never let diagnostic I/O break evidence publishing */ }
+    }
   }
 
   printsToStdio() { return true; }

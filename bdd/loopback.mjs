@@ -34,10 +34,12 @@ export async function loopbackProxy(allowed) {
     req.pipe(upstream);
   });
   server.on('connect', (req, downstream, head) => {
-    let url;
-    try { url = new URL(`https://${req.url}`); } catch { /* malformed tunnel target */ }
-    if (!url || !accept(url, 'https:')) return downstream.end('HTTP/1.1 403 Forbidden\r\n\r\n');
-    const upstream = net.connect(Number(url.port || 443), upstreamHost(url.hostname));
+    const target = ['https:', 'http:'].map(protocol => {
+      try { const url = new URL(`${protocol}//${req.url}`); return accept(url, protocol) ? url : null; } catch { return null; }
+    }).find(Boolean);
+    if (!target) return downstream.end('HTTP/1.1 403 Forbidden\r\n\r\n');
+    const port = Number(target.port || (target.protocol === 'https:' ? 443 : 80));
+    const upstream = net.connect(port, upstreamHost(target.hostname));
     upstream.once('connect', () => {
       downstream.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head.length) upstream.write(head);

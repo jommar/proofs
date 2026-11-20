@@ -79,6 +79,41 @@ function exec(command, { cwd, env, signal, timeoutMs = STEP_TIMEOUT_MS, log }) {
   });
 }
 
+function exportCommit(repo, sha, src, { cwd, env, signal, log }) {
+  return new Promise((resolve, reject) => {
+    signal.throwIfAborted();
+    const git = spawn('git', ['-C', repo, 'archive', '--format=tar', sha], { cwd, env, detached: true, stdio: ['ignore', 'pipe', log] });
+    const tar = spawn('tar', ['-x', '-C', src], { cwd, env, detached: true, stdio: ['pipe', log, log] });
+    git.stdout.pipe(tar.stdin);
+    const stop = () => {
+      for (const child of [git, tar]) {
+        if (child.pid) try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+      }
+    };
+    const timer = setTimeout(stop, STEP_TIMEOUT_MS);
+    signal.addEventListener('abort', stop, { once: true });
+    let pending = 2;
+    let firstError;
+    const finish = (code, err) => {
+      if (err && !firstError) firstError = err;
+      else if (code !== 0 && !firstError) firstError = safe(`exited with code ${code}`);
+      if (--pending !== 0) return;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', stop);
+      if (signal.aborted) reject(signal.reason);
+      else if (firstError) reject(firstError);
+      else resolve();
+    };
+    for (const child of [git, tar]) {
+      let ended = false;
+      const onceEnd = (code, err) => { if (!ended) { ended = true; finish(code, err); } };
+      child.once('error', err => { stop(); onceEnd(1, err); });
+      child.once('close', code => onceEnd(code ?? 1));
+    }
+    tar.stdin.on('error', () => { /* broken pipe if tar exits early */ });
+  });
+}
+
 async function waitReady(url, child, signal, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -114,17 +149,25 @@ export async function startSandbox({ id, dir, commits, options, env: operatorEnv
   });
 
   async function close() {
-    for (const child of started.reverse()) {
+    const running = started.splice(0).reverse();
+    for (const child of running) {
       try { process.kill(-child.pid, 'SIGTERM'); } catch { /* already gone */ }
-      await Promise.race([new Promise(resolve => child.once('close', resolve)), sleep(5000)]);
-      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    if (running.length) {
+      const done = Promise.all(running.map(child => child.exitCode !== null ? undefined : new Promise(resolve => child.once('close', resolve))));
+      const timer = new AbortController();
+      await Promise.race([done, sleep(5000, undefined, { signal: timer.signal }).catch(() => {})]);
+      timer.abort();
+      for (const child of running) {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+      }
     }
     const vars = { dir, id, slug };
     const errors = [];
     for (const command of config.teardown) {
       try { await exec(fill(command, vars), { cwd: dir, env: base, signal: new AbortController().signal, log }); } catch (error) { errors.push(error); }
     }
-    log.end();
+    await new Promise(resolve => log.end(resolve));
     if (errors.length) throw new AggregateError(errors, 'Teardown failed.');
   }
 
@@ -141,10 +184,9 @@ export async function startSandbox({ id, dir, commits, options, env: operatorEnv
       const pin = commits[app] ?? fail(`${name}: the manifest has no app "${app}".`);
       const src = join(dir, 'src', app);
       await mkdir(src, { recursive: true, mode: 0o700 });
-      const tar = join(dir, `${app}.tar`);
-      await step('exporting the pinned commit', () => exec('git -C "$PROOF_REPO" archive --format=tar -o "$PROOF_TAR" "$PROOF_SHA" && tar -xf "$PROOF_TAR" -C "$PROOF_SRC"', {
+      await step('exporting the pinned commit', () => exportCommit(pin.repo, pin.sha, src, {
         cwd: dir, signal, log,
-        env: { PATH: base.PATH, ...GIT_ENV, PROOF_REPO: pin.repo, PROOF_SHA: pin.sha, PROOF_TAR: tar, PROOF_SRC: src },
+        env: { PATH: base.PATH, ...GIT_ENV },
       }));
       for (const path of list(service.link)) {
         await mkdir(dirname(join(src, path)), { recursive: true });
@@ -166,7 +208,13 @@ export async function startSandbox({ id, dir, commits, options, env: operatorEnv
       await step('start', () => waitReady(`${urls[name]}${service.ready ?? '/'}`, child, signal, (service.readySeconds ?? READY_TIMEOUT_MS / 1000) * 1000));
     }
   } catch (error) {
-    await close().catch(() => {});
+    let closeError;
+    await close().catch(err => { closeError = err; });
+    if (closeError) {
+      const combined = new AggregateError([error, closeError], error?.proofSafe ? error.message : 'Startup and rollback failed.');
+      if (error?.proofSafe) combined.proofSafe = true;
+      throw combined;
+    }
     throw error;
   }
 

@@ -46,7 +46,7 @@ async function fixture(t, folders) {
 
   async function run(label, vars) {
     const dir = join(root, label);
-    await mkdir(dir);
+    await mkdir(dir, { recursive: true });
     const resultsPath = join(dir, 'results.ndjson');
     const env = { PATH: process.env.PATH, NODE_PATH: process.env.NODE_PATH, PROOF_RUN_DIR: dir, PROOF_RESULTS: resultsPath, ...vars };
     const { stdout, stderr } = await exec(process.execPath, [entry, ticket], { env, timeout: 15_000 });
@@ -311,4 +311,29 @@ test('literal IPv4 and IPv6 loopbacks and generated localhost names reach local 
   assert.deepEqual(verdicts(rows), [['AC1', 'pass'], ['AC2', 'pass'], ['AC3', 'pass']]);
   assert.deepEqual([ipv4, ipv6, named].map(service => service.calls[0]?.headers.host),
     [`127.0.0.2:${ipv4.port}`, `[::1]:${ipv6.port}`, new URL(named.origin).host]);
+});
+
+test('PROOF_ACS filters Bruno requests while keeping prerequisites and writes failure diagnostics to api.log', async t => {
+  const proof = await fixture(t, [{ path: 'flow', auth: 'none', requests: {
+    '01-seed.bru': { role: 'prerequisite' },
+    '02-ac1.bru': { ac: 'AC1' },
+    '03-ac2.bru': { ac: 'AC2' },
+  }, files: {
+    '01-seed.bru': bru({ seq: 1, path: '/seed', extra: 'vars:post-response {\n  itemId: res.body.id\n}' }),
+    '02-ac1.bru': bru({ seq: 2, path: '/items/{{itemId}}', assertions: 'res.status: eq 200' }),
+    '03-ac2.bru': bru({ seq: 3, path: '/fail', assertions: 'res.status: eq 200' }),
+  } }]);
+  const service = await fake(t, call => call.path === '/seed' ? { body: { id: 'item-7' } }
+    : call.path === '/fail' ? { status: 500, body: { error: 'boom' } } : { body: { ok: true } });
+
+  const filtered = await proof.run('filtered', { PROOF_CATALOG2_URL: service.origin, PROOF_ACS: 'AC1' });
+  assert.deepEqual(verdicts(filtered.rows), [['AC1', 'pass']]);
+  assert.deepEqual(service.calls.map(c => c.path), ['/seed', '/items/item-7']);
+
+  const diagDir = join(proof.root, 'failing', 'diag');
+  await mkdir(diagDir, { recursive: true, mode: 0o700 });
+  const failing = await proof.run('failing', { PROOF_CATALOG2_URL: service.origin, PROOF_ACS: 'AC2', PROOF_DIAGNOSTICS_DIR: diagDir });
+  assert.deepEqual(verdicts(failing.rows), [['AC2', 'fail']]);
+  const diagLog = await readFile(join(diagDir, 'api.log'), 'utf8');
+  assert.match(diagLog, /\[flow\/03-ac2\.bru\] fail:/);
 });

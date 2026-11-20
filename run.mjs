@@ -1,14 +1,16 @@
 import { spawn } from 'node:child_process';
+import { createWriteStream } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { formatPlan, makeReport, readEvidence } from './lib/evidence.mjs';
 import { record, resolveInputs } from './lib/inputs.mjs';
 import { localOrigin, proofContextKey, proofUrlKey } from './lib/origins.mjs';
+import { describeRun, recordRun } from './lib/runs.mjs';
 import { readProofInputs, stageProofInputs, unlockProofInputs } from './lib/snapshot.mjs';
 
 const CREDENTIAL_KEYS = ['PROOF_USERNAME', 'PROOF_PASSWORD'];
@@ -133,35 +135,97 @@ async function adapterEnv(sandbox, { ticket, target }, side, dir, sandboxDir, pa
   return { env, scoped: { bdd, api }, credentials: [...credentials] };
 }
 
-async function invokeChild({ entry, ticketDir, cwd, env, signal }) {
+async function invokeChild({ entry, ticketDir, cwd, env, signal, logPath }) {
   if (!(await lstat(entry)).isFile() || await realpath(entry) !== entry) throw new Error('Invalid adapter entry');
   signal.throwIfAborted();
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [entry, ticketDir], { cwd, env, stdio: 'ignore', detached: true });
-    let launchError;
-    const cancel = () => {
-      if (child.pid) {
-        // The adapter can itself spawn test workers. Stop the whole proof-owned group.
-        try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already stopped */ }
-      }
-    };
-    signal.addEventListener('abort', cancel, { once: true });
-    if (signal.aborted) cancel();
-    child.once('error', error => { launchError = error; });
-    child.once('close', code => {
-      signal.removeEventListener('abort', cancel);
-      if (launchError) reject(launchError);
-      else resolve(code);
+  let log;
+  if (logPath) {
+    log = createWriteStream(logPath, { mode: 0o600, flags: 'a' });
+    await new Promise(resolve => log.once('open', resolve));
+  }
+  try {
+    return await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [entry, ticketDir], { cwd, env, stdio: log ? ['ignore', log, log] : 'ignore', detached: true });
+      let launchError;
+      const cancel = () => {
+        if (child.pid) {
+          // The adapter can itself spawn test workers. Stop the whole proof-owned group.
+          try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already stopped */ }
+        }
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+      if (signal.aborted) cancel();
+      child.once('error', error => { launchError = error; });
+      child.once('close', code => {
+        signal.removeEventListener('abort', cancel);
+        if (launchError) reject(launchError);
+        else resolve(code);
+      });
     });
-  });
+  } finally {
+    if (log) await new Promise(resolve => log.end(resolve));
+  }
+}
+
+async function copyNonEmptyDiagnostics(src, dest) {
+  let copied = false;
+  const entries = await readdir(src, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const from = join(src, entry.name);
+    const to = join(dest, entry.name);
+    if (entry.isDirectory()) {
+      const sub = await copyNonEmptyDiagnostics(from, to);
+      if (sub) copied = true;
+    } else if (entry.isFile()) {
+      const info = await stat(from).catch(() => null);
+      if (!info?.size) continue;
+      await mkdir(dest, { recursive: true, mode: 0o700 });
+      await copyFile(from, to);
+      await chmod(to, 0o600);
+      copied = true;
+    }
+  }
+  return copied;
+}
+
+async function collectDiagnostics(scratch, runDir, side = 'run') {
+  const diagDest = join(runDir, 'diagnostics');
+  let copied = false;
+  const serviceLog = join(scratch, side, 'sandbox', 'service.log');
+  const serviceInfo = await stat(serviceLog).catch(() => null);
+  if (serviceInfo?.isFile() && serviceInfo.size > 0) {
+    await mkdir(diagDest, { recursive: true, mode: 0o700 });
+    const destLog = join(diagDest, 'service.log');
+    await copyFile(serviceLog, destLog);
+    await chmod(destLog, 0o600);
+    copied = true;
+  }
+  const checksDiag = join(scratch, side, 'checks', 'diagnostics');
+  if (await copyNonEmptyDiagnostics(checksDiag, diagDest)) copied = true;
+  return copied ? diagDest : undefined;
+}
+
+async function cleanupScratch(scratch, phases) {
+  // A read-only directory must be made writable before recursively removing our snapshot.
+  for (const [side, phase] of Object.entries(phases)) {
+    const checkDir = join(scratch, side, 'checks');
+    for (const name of ['proofs', 'csv']) await unlockProofInputs(join(checkDir, name));
+    await rm(phase.retainSandbox ? checkDir : join(scratch, side), { recursive: true, force: true });
+  }
+  if (Object.values(phases).some(phase => phase.retainSandbox)) {
+    await rm(join(scratch, 'capture'), { recursive: true, force: true });
+  } else {
+    await rm(scratch, { recursive: true, force: true });
+  }
 }
 
 async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, adapterTimeoutMs, parentEnv, signal }) {
-  const outcome = { rows: [], issues: [], invoked: false };
+  const outcome = { rows: [], issues: [], invoked: false, timings: { adapters: {} } };
   const sandboxDir = join(dir, 'sandbox');
   const checksDir = join(dir, 'checks');
   let sandbox;
   let stage = 'sandbox startup';
+  const startupStart = Date.now();
   try {
     signal.throwIfAborted();
     sandbox = await startSandbox({
@@ -171,25 +235,36 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
     if (typeof sandbox?.close !== 'function') throw new Error('Sandbox close is required.');
     stage = 'sandbox environment validation';
     const { env: shared, scoped, credentials } = await adapterEnv(sandbox, input, side, checksDir, sandboxDir, parentEnv);
+    outcome.timings.startupMs = Date.now() - startupStart;
     const ids = new Set(input.acs.map(({ id }) => id));
     if (input.check && input.target) {
       for (const [key, origin] of Object.entries(sandbox.env).filter(([name]) => /^PROOF_[A-Z0-9_]+_URL$/.test(name))) {
         if (!await reachable(origin, input.target.insecureTls)) outcome.issues.push(`${key.slice(6, -4).toLowerCase()} is not reachable (DNS, connection or TLS).`);
       }
     }
+    const diagRoot = await privateDir(join(checksDir, 'diagnostics'), true);
     for (const adapter of input.check ? [] : input.adapters) {
       signal.throwIfAborted();
-      const env = { ...shared, ...scoped[adapter.name], PROOF_RESULTS: join(checksDir, `${adapter.name}.ndjson`) };
+      const adapterStart = Date.now();
+      const adapterDiag = await privateDir(join(diagRoot, adapter.name), true);
+      const env = {
+        ...shared, ...scoped[adapter.name],
+        PROOF_RESULTS: join(checksDir, `${adapter.name}.ndjson`),
+        PROOF_DIAGNOSTICS_DIR: adapterDiag,
+        ...(input.debug ? { PROOF_DEBUG: '1' } : {}),
+        ...(input.selectedAcs?.length ? { PROOF_ACS: input.selectedAcs.join(',') } : {}),
+      };
       const deadline = AbortSignal.timeout(adapterTimeoutMs);
       let code;
       let invocationFailed = false;
       try {
         const ticketDir = join(checksDir, 'proofs', adapter.name, input.ticket);
-        code = await invoke({ ...adapter, ticketDir, cwd: checksDir, env, signal: AbortSignal.any([signal, deadline]) });
+        code = await invoke({ ...adapter, ticketDir, cwd: checksDir, env, logPath: join(adapterDiag, 'stdio.log'), signal: AbortSignal.any([signal, deadline]) });
         outcome.invoked = true;
       } catch {
         invocationFailed = true;
       }
+      outcome.timings.adapters[adapter.name] = Date.now() - adapterStart;
       signal.throwIfAborted();
       if (deadline.aborted) {
         outcome.issues.push(`${adapter.name} adapter timed out after ${adapterTimeoutMs / 1000} seconds; partial evidence discarded.`);
@@ -201,7 +276,7 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
       }
       let rows;
       try {
-        rows = await readEvidence(env.PROOF_RESULTS, ids, credentials);
+        rows = await readEvidence(env.PROOF_RESULTS, ids, credentials, { allowEmpty: input.selectedAcs?.length > 0 });
       } catch {
         outcome.issues.push(`${adapter.name} adapter did not produce valid evidence.`);
         continue;
@@ -219,12 +294,15 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
     }
     signal.throwIfAborted();
   } catch (error) {
+    if (outcome.timings.startupMs === undefined) outcome.timings.startupMs = Date.now() - startupStart;
     outcome.issues.push(runIssue(stage, signal, error));
     // Runtime reports startup plus failed rollback as an AggregateError.
     if ((sandbox && typeof sandbox.close !== 'function') || (!sandbox && error instanceof AggregateError)) outcome.retainSandbox = true;
   } finally {
     if (typeof sandbox?.close === 'function') {
+      const teardownStart = Date.now();
       try { await sandbox.close(); } catch { outcome.retainSandbox = true; }
+      outcome.timings.teardownMs = Date.now() - teardownStart;
     }
     if (signal.aborted && !outcome.issues.includes('Run canceled.')) outcome.issues.push('Run canceled.');
     if (outcome.retainSandbox) {
@@ -232,6 +310,66 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
     }
   }
   return outcome;
+}
+
+function formatServeReady(ticket, env, login) {
+  const urls = Object.entries(env).filter(([key]) => proofUrlKey.test(key))
+    .map(([key, origin]) => [key.slice(6, -4).toLowerCase(), origin]);
+  const contexts = Object.entries(env).filter(([key]) => proofContextKey.test(key) && !key.endsWith('_URL'))
+    .map(([key, value]) => [key.slice('PROOF_CONTEXT_'.length).toLowerCase(), value]);
+  const urlFlags = urls.map(([name, origin]) => `--url ${name}=${origin}`).join(' ');
+  const ctxFlags = contexts.map(([key, value]) => `--context ${key}=${value}`).join(' ');
+  const loginFlag = login ? ` --login ${login.usernameEnv},${login.passwordEnv}` : '';
+  const cmd = `node proofs/run.mjs ${ticket} ${urlFlags}${ctxFlags ? ` ${ctxFlags}` : ''}${loginFlag} --debug`;
+  return [
+    `Sandbox ready for ${ticket} (Ctrl-C to stop):`,
+    ...urls.map(([name, origin]) => `  ${name}: ${origin}`),
+    ...contexts.map(([key, value]) => `  context.${key}: ${value}`),
+    `Iterate with: ${cmd}`,
+  ].join('\n');
+}
+
+async function runServe(input, id, scratch, { parentEnv, signal, captureDataset, startSandbox, onReady }) {
+  const captureDir = await privateDir(join(scratch, 'capture'));
+  const sideDir = await privateDir(join(scratch, 'run'));
+  const sandboxDir = await privateDir(join(sideDir, 'sandbox'));
+  const checksDir = await privateDir(join(sideDir, 'checks'));
+  let sandbox;
+  let stage = 'runtime loading';
+  try {
+    const runtime = startSandbox ? { captureDataset, startSandbox } : await import(pathToFileURL(input.runtime).href);
+    if (typeof runtime.startSandbox !== 'function' || (runtime.captureDataset !== undefined && typeof runtime.captureDataset !== 'function')) {
+      throw new Error('Invalid runtime exports.');
+    }
+    let dataset;
+    if (runtime.captureDataset) {
+      stage = 'dataset capture';
+      dataset = await runtime.captureDataset({ dir: captureDir, workspace: input.workspace, options: structuredClone(input.runtimeOptions), signal });
+      if (dataset == null) throw new Error('Dataset capture returned no dataset.');
+    }
+    stage = 'sandbox startup';
+    sandbox = await runtime.startSandbox({
+      id: `proof-${id}-run`, dir: sandboxDir, workspace: input.workspace, dataset,
+      commits: structuredClone(input.commits.run), options: structuredClone(input.runtimeOptions), env: input.env, signal,
+    });
+    if (typeof sandbox?.close !== 'function') throw new Error('Sandbox close is required.');
+    stage = 'sandbox environment validation';
+    const { env: shared } = await adapterEnv(sandbox, input, 'run', checksDir, sandboxDir, parentEnv);
+    const urls = Object.fromEntries(Object.entries(shared).filter(([key]) => proofUrlKey.test(key)));
+    const message = formatServeReady(input.ticket, shared, input.runtimeOptions?.login);
+    if (onReady) await onReady({ urls, env: shared, message });
+    else console.log(message);
+    if (!signal.aborted) {
+      await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+    }
+    return { exitCode: 0, served: true, message };
+  } catch (error) {
+    return { exitCode: 1, served: false, issue: runIssue(stage, signal, error) };
+  } finally {
+    if (typeof sandbox?.close === 'function') {
+      await sandbox.close().catch(() => {});
+    }
+  }
 }
 
 // Target mode starts nothing: the sandbox is the running environment the operator named with --url.
@@ -281,7 +419,7 @@ async function runPhases(input, snapshot, id, scratch, options) {
 
 export async function run(args, {
   workspace = process.cwd(), parentEnv = process.env, signal = new AbortController().signal,
-  captureDataset, startSandbox, invoke = invokeChild, adapterTimeoutMs = ADAPTER_TIMEOUT_MS,
+  captureDataset, startSandbox, invoke = invokeChild, adapterTimeoutMs = ADAPTER_TIMEOUT_MS, onReady,
 } = {}) {
   const input = await resolveInputs(args, workspace, parentEnv);
   const snapshot = await readProofInputs(input);
@@ -289,36 +427,57 @@ export async function run(args, {
   if (input.plan) return { exitCode: 0, plan: formatPlan(input, adapterTimeoutMs) };
 
   const id = randomUUID();
+  const startedMs = Date.now();
+  const startedAt = new Date(startedMs).toISOString();
   const out = await privateDir(join(input.proofsRoot, '.proofs-out'), true);
   const ticketOut = await privateDir(join(out, input.ticket), true);
   const runDir = await privateDir(join(ticketOut, id));
   const scratch = await privateDir(join(runDir, '.private'));
+
+  if (input.serve) {
+    const served = await runServe(input, id, scratch, { parentEnv, signal, captureDataset, startSandbox, onReady });
+    let diagnosticsDir;
+    if (!served.served) diagnosticsDir = await collectDiagnostics(scratch, runDir, 'run');
+    await rm(scratch, { recursive: true, force: true }).catch(() => {});
+    if (!diagnosticsDir) await rm(runDir, { recursive: true, force: true }).catch(() => {});
+    return { ...served, ...(diagnosticsDir ? { diagnosticsDir } : {}) };
+  }
+
   const phases = await runPhases(input, snapshot, id, scratch, { parentEnv, signal, captureDataset, startSandbox, invoke, adapterTimeoutMs });
+  const durationMs = Date.now() - startedMs;
+  if (phases.run) phases.run.timings = { ...(phases.run.timings ?? { adapters: {} }), durationMs };
+
+  if (input.check) {
+    const { issues } = phases.run;
+    let diagnosticsDir;
+    if (issues.length) diagnosticsDir = await collectDiagnostics(scratch, runDir, 'run');
+    try { await cleanupScratch(scratch, phases); } catch { /* best-effort cleanup */ }
+    if (!diagnosticsDir && !phases.run.retainSandbox) await rm(runDir, { recursive: true, force: true }).catch(() => {});
+    return {
+      exitCode: issues.length ? 1 : 0,
+      check: issues.length ? `NOT READY — ${issues.join(' ')}` : 'ready',
+      ...(diagnosticsDir ? { diagnosticsDir } : {}),
+    };
+  }
+
+  const { report, exitCode } = makeReport(input, id, phases);
+  let diagnosticsDir;
+  if (exitCode !== 0 || input.debug || phases.run.issues.length > 0) {
+    diagnosticsDir = await collectDiagnostics(scratch, runDir, 'run');
+  }
   try {
-    // A read-only directory must be made writable before recursively removing our snapshot.
-    for (const [side, phase] of Object.entries(phases)) {
-      const checkDir = join(scratch, side, 'checks');
-      for (const name of ['proofs', 'csv']) await unlockProofInputs(join(checkDir, name));
-      await rm(phase.retainSandbox ? checkDir : join(scratch, side), { recursive: true, force: true });
-    }
-    if (Object.values(phases).some(phase => phase.retainSandbox)) {
-      await rm(join(scratch, 'capture'), { recursive: true, force: true });
-    } else {
-      await rm(scratch, { recursive: true, force: true });
-    }
+    await cleanupScratch(scratch, phases);
   } catch {
     phases.run.issues.push('Private run files could not be removed; check the run directory.');
   }
-  if (input.check) {
-    // A readiness check leaves no report: it only says whether each side could start.
-    await rm(runDir, { recursive: true, force: true });
-    const { issues } = phases.run;
-    return { exitCode: issues.length ? 1 : 0, check: issues.length ? `NOT READY — ${issues.join(' ')}` : 'ready' };
-  }
-  const { report, exitCode } = makeReport(input, id, phases);
   const reportPath = join(runDir, 'report.md');
   await writeFile(reportPath, report, { flag: 'wx', mode: 0o600 });
-  return { exitCode, reportPath };
+  // The report is the deliverable: a failed index write is reported beside it, never as a failed run.
+  const runsWarning = await recordRun(out, input.ticket, id, describeRun(input, args, id, {
+    startedAt, exitCode, reportPath, durationMs, timings: phases.run.timings,
+  }))
+    .then(() => undefined, () => 'Run was not added to .proofs-out/runs.json.');
+  return { exitCode, reportPath, runsWarning, ...(diagnosticsDir ? { diagnosticsDir } : {}) };
 }
 
 async function main() {
@@ -328,7 +487,15 @@ async function main() {
   process.on('SIGTERM', cancel);
   try {
     const result = await run(process.argv.slice(2), { signal: controller.signal });
-    console.log(result.plan ?? result.check ?? `Report: ${result.reportPath}`);
+    if (result.served) {
+      // Ready banner was already printed before awaiting Ctrl-C.
+    } else if (result.issue) {
+      console.error(result.issue);
+    } else {
+      console.log(result.plan ?? result.check ?? `Report: ${result.reportPath}`);
+    }
+    if (result.diagnosticsDir) console.error(`Diagnostics: ${result.diagnosticsDir}`);
+    if (result.runsWarning) console.error(result.runsWarning);
     process.exitCode = result.exitCode;
   } catch (error) {
     // Native filesystem errors can contain arbitrary input paths; do not forward them.

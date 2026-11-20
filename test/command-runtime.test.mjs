@@ -116,5 +116,28 @@ test('link symlinks a path from the primary checkout into the exported tree', as
   const options = { services: { app: { link: ['node_modules'], start: 'node server.js' } } };
   const sandbox = await startSandbox({ id: 'proof-l', dir: join(root, 'side'), commits: { app: { repo, sha: commits[0] } }, options, signal: new AbortController().signal });
   assert.equal(readFileSync(join(root, 'side', 'src', 'app', 'node_modules', 'dep.txt'), 'utf8'), 'linked');
+  assert.equal(existsSync(join(root, 'side', 'app.tar')), false, 'streaming export writes no intermediate tar file');
   await sandbox.close();
+});
+
+test('close stops multiple services in parallel and startup rollback failure surfaces AggregateError', async t => {
+  const { root, repo, commits } = await fixture(t);
+  const slowStop = "const srv = require('node:http').createServer((q, s) => s.end('ok')).listen(Number(process.env.PORT), '127.0.0.1'); process.on('SIGTERM', () => setTimeout(() => { srv.close(); process.exit(0); }, 200));";
+  const options = {
+    services: {
+      one: { app: 'app', start: `node -e ${JSON.stringify(slowStop)}` },
+      two: { app: 'app', start: `node -e ${JSON.stringify(slowStop)}` },
+    },
+  };
+  const sandbox = await startSandbox({ id: 'proof-par', dir: join(root, 'par'), commits: { app: { repo, sha: commits[0] } }, options, signal: new AbortController().signal });
+  const t0 = Date.now();
+  await sandbox.close();
+  assert.ok(Date.now() - t0 < 1500, 'services stopped concurrently rather than serially');
+
+  const failing = startSandbox({
+    id: 'proof-agg', dir: join(root, 'agg'), commits: { app: { repo, sha: commits[0] } },
+    options: { services: { app: { setup: ['exit 2'], start: 'node server.js' } }, teardown: ['exit 9'] },
+    signal: new AbortController().signal,
+  });
+  await assert.rejects(failing, error => error instanceof AggregateError && error.proofSafe === true && /setup command 1 failed/.test(error.message));
 });

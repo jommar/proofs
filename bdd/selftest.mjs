@@ -94,6 +94,8 @@ test('isolated BDD runs emit only checked facts, block unmet prerequisites and r
   const httpPort = await serve(t, createServer((req, res) => {
     if (req.url === '/download') {
       res.writeHead(200, { 'Content-Disposition': 'attachment; filename="fake.txt"' }).end('download');
+    } else if (req.url === '/http-ping') {
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"ok":true}');
     } else {
       res.writeHead(502, { 'Content-Type': 'text/plain', 'X-Proof-Proxy-Failure': '1' }).end('App returned an error');
     }
@@ -165,6 +167,10 @@ test('isolated BDD runs emit only checked facts, block unmet prerequisites and r
   @AC14
   Scenario: A normal download abort is harmless
     Then the download aborts the navigation as expected
+
+  @AC15
+  Scenario: Plain-HTTP loopback proof.fetch reaches an allowed origin
+    Then the plain HTTP endpoint answers via proof.fetch
 `);
   await writeFile(join(ticket, 'steps', 'proof.js'), `
 import { Given, When, Then } from '../../fixtures.mjs';
@@ -212,6 +218,11 @@ Then('the download aborts the navigation as expected', async ({ page, proof }) =
   const expectedAbort = request.isNavigationRequest() && request.failure()?.errorText === 'net::ERR_ABORTED';
   proof.check(expectedAbort, { expectedAbort });
 });
+Then('the plain HTTP endpoint answers via proof.fetch', async ({ proof }) => {
+  const response = await proof.fetch(process.env.PROOF_HTTP_URL + '/http-ping');
+  const body = await response.json();
+  proof.check(response.status() === 200 && body.ok === true, { ok: body.ok === true });
+});
 `);
 
   async function run(side, storefront = origin) {
@@ -257,6 +268,7 @@ Then('the download aborts the navigation as expected', async ({ page, proof }) =
     { ac: 'AC12', status: 'pass', observed: { appError: true } },
     { ac: 'AC13', status: 'pass', observed: { appError: true } },
     { ac: 'AC14', status: 'pass', observed: { expectedAbort: true } },
+    { ac: 'AC15', status: 'pass', observed: { ok: true } },
   ];
   const [base, head, refused] = await Promise.all([
     run('before'), run('after'), run('remote', 'https://example.invalid'),
@@ -267,4 +279,30 @@ Then('the download aborts the navigation as expected', async ({ page, proof }) =
   assert.equal(forbiddenRequests, 0);
   assert.deepEqual((await readdir(scratch)).sort(), ['after.ndjson', 'before.ndjson', 'remote.ndjson']);
   assert.deepEqual(await readdir(ticket), ['features', 'steps']);
+
+  // PROOF_ACS runs only selected ACs and PROOF_DIAGNOSTICS_DIR records failure details outside the NDJSON evidence.
+  const diagDir = join(scratch, 'diag');
+  await mkdir(diagDir, { recursive: true, mode: 0o700 });
+  const filteredPath = join(scratch, 'filtered.ndjson');
+  await exec(process.execPath, [runner, ticket], { env: {
+    ...process.env,
+    PROOF_RUN_DIR: scratch,
+    PROOF_RESULTS: filteredPath,
+    PROOF_DIAGNOSTICS_DIR: diagDir,
+    PROOF_ACS: 'AC3,AC15',
+    PROOF_CSV_DIR: root,
+    PROOF_SIDE: 'filtered',
+    PROOF_TICKET: 'TEST',
+    PROOF_IDENTITY2_URL: identity,
+    PROOF_STOREFRONT_URL: origin,
+    PROOF_HTTP_URL: `http://127.0.0.1:${httpPort}`,
+  } });
+  const filteredRows = (await readFile(filteredPath, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(filteredRows, [
+    { ac: 'AC3', status: 'fail', observed: { matching: 0 } },
+    { ac: 'AC15', status: 'pass', observed: { ok: true } },
+  ]);
+  const bddDiag = JSON.parse(await readFile(join(diagDir, 'bdd-failures.json'), 'utf8'));
+  assert.equal(bddDiag.entries.length, 1);
+  assert.deepEqual(bddDiag.entries[0].tags, ['@AC3']);
 });

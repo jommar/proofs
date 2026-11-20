@@ -45,6 +45,9 @@ Targets and flags:
 - `--url [name=]<origin>`: test a running environment; nothing is started. `--context key=value` passes check inputs (such as a dummy tenant) and `--branch <label>` only labels the report.
 - `--login <userVar>,<passVar>`: names the environment variables holding the login, never the values. They are read from the shell, then `<workspace>/.env`. Never print them.
 - `--only bdd|api` limits adapters. `--runtime <file>` uses a custom runtime.
+- `--serve` keeps a local `--worktree` sandbox running until `Ctrl-C` and prints the matching `--url` iterate command so you can fix and re-run checks without restarting services.
+- `--ac AC1,AC3` runs only the listed ACs and marks unselected ACs as `Skipped — filtered out by --ac` (partial run; never treat as full ticket proof).
+- `--debug` retains private `0o600` diagnostics (`<run-dir>/diagnostics/`: `service.log`, `bddgen.log`, `playwright.log`, `bdd-failures.json`, `api.log`, and Playwright failure traces/screenshots) even on a passing run. Any failing or blocked run (including a failed `--check`) automatically retains non-empty diagnostics there while keeping `report.md` strictly redacted.
 
 ## Compare a feature branch with its base
 
@@ -88,9 +91,10 @@ Against a running environment (`--url`) there is no base: test the deployed buil
 
 ## Step 4: report
 
-Report each AC as **Pass**, **Fail**, **Blocked** (a fixture, login or response was missing: not a product failure) or
-**Uncovered** (no check). State which ACs have no checks; never call a ticket proven on partial coverage. A report
-is evidence only for the run that produced it. For a base-versus-feature comparison, use the table in the previous section.
+Report each AC as **Pass**, **Fail**, **Blocked** (a fixture, login or response was missing: not a product failure),
+**Skipped** (filtered out by `--ac`), or **Uncovered** (no check). State which ACs have no checks; never call a ticket
+proven on partial coverage. A report is evidence only for the run that produced it (including its `Duration:` phase
+breakdown). For a base-versus-feature comparison, use the table in the previous section.
 
 ## Use subagents to go faster
 
@@ -107,8 +111,8 @@ If your agent runtime has subagents, split the independent work and keep the jud
 - Runs that share a scratch resource (for example one database name per ticket) must run one after another.
 - A setting that differs per AC (Yes for one, No for another) needs a run for each value.
 - The browser adapter's proxy blocks every host except the target origin. An app that loads a third-party script before it mounts stays blank; stub that one request in the check with `page.route(url, route => route.fulfill(...))`. Nothing leaves the machine.
-- For a blank page or a Blocked UI step, put the failing stage in the block reason (counts only, no page text) and reproduce it in a standalone Playwright script before guessing.
-- Browser tests get 90 seconds each and 240 seconds overall (`bdd/run.mjs`); a step that waits longer has its page closed.
+- For a blank page or a Blocked UI step, inspect `<run-dir>/diagnostics/bdd/bdd-failures.json` and `diagnostics/service.log` first, or re-run that AC with `--serve` + `--url ... --ac <ID> --debug` to capture Playwright traces and screenshots before guessing.
+- Browser tests get 90 seconds each and 270 seconds overall (`bdd/run.mjs`); a step that waits longer has its page closed. A single timed-out scenario no longer wipes already-passing ACs in the same run.
 - Treat worktrees as read-only inputs and do not disturb the user's own running stack.
 
 ## Safety

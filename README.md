@@ -28,6 +28,8 @@ node proofs/run.mjs TEAM-42 --worktree ~/work/app-base    --login APP_USER,APP_P
 node proofs/run.mjs TEAM-42 --url https://dev.example.com --branch feature/x         # a running environment
 node proofs/run.mjs TEAM-42 --worktree ~/work/app-feature --plan    # resolve inputs, digest and runtime; starts nothing
 node proofs/run.mjs TEAM-42 --worktree ~/work/app-feature --check   # start (or probe) only; run no ACs
+node proofs/run.mjs TEAM-42 --worktree ~/work/app-feature --serve   # keep the local sandbox up and print --url iterate command
+node proofs/run.mjs TEAM-42 --url http://127.0.0.1:4100 --ac AC1 --debug  # iterate on one AC with private failure diagnostics
 ```
 
 A run without `--url` or `--worktree` fails with `Give a target`. Add `--workspace <path>` if you are not in the directory the paths are relative to. Read `.proofs-out/TEAM-42/<run-id>/report.md`: one row per AC with a single Result column.
@@ -43,6 +45,10 @@ The command exits nonzero for any blocker, uncovered AC or nonpassing result. A 
 **Is the environment broken, or did the AC fail?** `--check` starts the checkout (or, with `--url`, probes each origin) and prints `ready` or `NOT READY — <cause>` without running any AC. A startup failure in a report names the service, step and exit code, for example `app: setup command 2 failed (exited with code 3)`; command text and output are never shown.
 
 `--only bdd` or `--only api` (repeatable) runs just those adapters; the other ACs report as uncovered. Use it to keep a read-only run away from checks that write.
+
+`--ac AC1,AC3` (repeatable) runs only the listed ACs and marks unselected ACs as skipped (partial run). Combine with `--serve` (which keeps a local `--worktree` sandbox running until `Ctrl-C` and prints the matching `--url` iterate command) to debug checks without restarting services each time.
+
+`--debug` retains private local diagnostics (`0o600` files under `<run-dir>/diagnostics/`: `service.log`, adapter logs, `bdd-failures.json`, and Playwright failure traces/screenshots) even on a passing run. Any failing or blocked run (including a failed `--check`) automatically retains non-empty diagnostics there while keeping `report.md` strictly redacted. Each report and `runs.json` entry records total and per-phase durations (`startup`, adapters, `teardown`).
 
 ## Test a local checkout
 
@@ -157,6 +163,19 @@ When a project needs more than commands (a database snapshot, a container stack)
 `--plan` resolves the target, the checkout commits and the proof-input digest without importing the runtime or writing output. A live run freezes the checks, ACs and CSVs, starts the target once (a sandbox for `--worktree`, nothing for `--url`), then runs the BDD and API adapters in turn. They share that run's state, so use separate records or restore what you change. Each adapter has a five-minute limit after startup.
 
 To compare a base and a feature, run the same ticket on each checkout and compare the `Proof inputs digest` in the two reports: it covers checks, ACs and CSVs, **not** runtime code, checkout commits or the dataset, so record those differences separately.
+
+## Directory layout
+
+| Path | Purpose |
+| --- | --- |
+| `run.mjs` | Main CLI entry point (`--worktree`, `--url`, `--plan`, `--check`, `--serve`, `--only`, `--ac`, `--debug`). |
+| `lib/` | Argument parsing (`inputs.mjs`), input snapshot/digest (`snapshot.mjs`), origin validation (`origins.mjs`), evidence/report rendering (`evidence.mjs`), `runs.json` index (`runs.mjs`). |
+| `runtime/` | Built-in local process runtime (`command.mjs`) — see [`runtime/README.md`](runtime/README.md). |
+| `bdd/` | Gherkin + Playwright browser adapter (`run.mjs`, `fixtures.mjs`, `loopback.mjs`, `reporter.mjs`) — see [`bdd/README.md`](bdd/README.md). |
+| `api/` | Declarative Bruno HTTP adapter (`run.mjs`) — see [`api/README.md`](api/README.md). |
+| `test/` | Harness unit/integration tests (`runner.test.mjs`, `command-runtime.test.mjs`). |
+| `examples/` | Self-contained end-to-end demo (`built-in-demo.mjs`). |
+| `prune.mjs` | Cleans unindexed run folders from `.proofs-out/` (`--yes` to delete). |
 
 ## License
 

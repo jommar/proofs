@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open, readFile, realpath, stat } from 'node:fs/promises';
+import { appendFile, open, readFile, realpath, stat } from 'node:fs/promises';
 import { validateHeaderValue } from 'node:http';
 import { createRequire } from 'node:module';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { localOrigin, proofContextKey, proofUrlKey } from '../lib/origins.mjs';
 import { check, parseRequest, prepare, responseValue } from './bruno.mjs';
 import { exchange } from './local-http.mjs';
@@ -115,33 +115,60 @@ function readAuthHeaders(value, origins) {
   return headers;
 }
 
-async function runFolder(ticket, folder, parser, { origins, globals, runtimeHeaders, privateValues, csvDir }) {
-  const specs = Object.values(folder.requests);
-  if (folder.auth === 'runtime' && !runtimeHeaders) return blocked(specs, 'Invalid runtime authentication header configuration');
+async function logDiag(diagFile, line) {
+  if (!diagFile) return;
+  await appendFile(diagFile, `${line}\n`, { mode: 0o600 }).catch(() => {});
+}
+
+async function runFolder(ticket, folder, parser, { origins, globals, runtimeHeaders, privateValues, csvDir, selectedAcs, diagFile }) {
+  const allSpecs = Object.values(folder.requests);
+  const matchingSpecs = selectedAcs ? allSpecs.filter(spec => spec.ac && selectedAcs.has(spec.ac)) : allSpecs;
+  if (selectedAcs && !matchingSpecs.length) return [];
+  if (folder.auth === 'runtime' && !runtimeHeaders) {
+    await logDiag(diagFile, `[${folder.path}] auth_error: Invalid runtime authentication header configuration`);
+    return blocked(matchingSpecs, 'Invalid runtime authentication header configuration');
+  }
   let requests;
   try {
-    requests = await Promise.all(Object.entries(folder.requests).map(async ([name, spec]) => ({
-      ...spec, ...parseRequest(parser, await privateInput(ticket, `${folder.path}/${name}`, 256 * 1024), spec.expectAuthRejection),
-    })));
-    if (new Set(requests.map(({ sequence }) => sequence)).size !== requests.length) throw new Error();
+    requests = await Promise.all(Object.entries(folder.requests).map(async ([name, spec]) => {
+      try {
+        return {
+          ...spec, file: name, ...parseRequest(parser, await privateInput(ticket, `${folder.path}/${name}`, 256 * 1024), spec.expectAuthRejection),
+        };
+      } catch (error) {
+        await logDiag(diagFile, `[${folder.path}/${name}] parse_error: ${error?.message || 'invalid Bruno request'}`);
+        throw error;
+      }
+    }));
+    if (new Set(requests.map(({ sequence }) => sequence)).size !== requests.length) {
+      await logDiag(diagFile, `[${folder.path}] sequence_error: duplicate seq values`);
+      throw new Error();
+    }
     requests.sort((a, b) => a.sequence - b.sequence);
   } catch {
-    return blocked(specs, 'Invalid or missing Bruno request, assertion, or sequence');
+    return blocked(matchingSpecs, 'Invalid or missing Bruno request, assertion, or sequence');
   }
   const rows = [];
   const state = new Map(globals);
   for (const [index, request] of requests.entries()) {
+    const selected = !selectedAcs || (request.ac && selectedAcs.has(request.ac));
+    const neededForChain = !request.ac || request.captures.length > 0;
+    if (!selected && !neededForChain) continue;
     let status;
     let observed;
     try {
       const authHeaders = folder.auth === 'runtime' ? runtimeHeaders[request.originKey] : undefined;
       if (folder.auth === 'runtime' && (!authHeaders || !Object.keys(authHeaders).length)) {
         [status, observed] = ['blocked', 'Runtime authentication headers missing for the selected origin'];
+        await logDiag(diagFile, `[${folder.path}/${request.file}] auth_missing: origin=${request.originKey}`);
       } else {
         const vars = new Map([...state, ...await csvVars(request.csv, csvDir)]);
         const prepared = prepare(request, origins, vars, authHeaders);
         const response = await exchange(prepared.url, prepared);
         [status, observed] = assessResponse(request, response, prepared.assertions);
+        if (status !== 'pass') {
+          await logDiag(diagFile, `[${folder.path}/${request.file}] ${status}: ${observed}`);
+        }
         for (const { name, value } of request.captures) {
           state.delete(name);
           if (status === 'pass') {
@@ -153,21 +180,28 @@ async function runFolder(ticket, folder, parser, { origins, globals, runtimeHead
       if (request.role === 'prerequisite' && request.captures.some(({ name }) => !state.has(name))) status = 'blocked';
     } catch (error) {
       status = 'blocked';
+      const detail = error?.code || error?.message || 'unknown_error';
+      await logDiag(diagFile, `[${folder.path}/${request.file}] request_error: ${detail}`);
       observed = error.message === 'Unsafe redirect' ? 'Cross-origin or invalid redirect refused' :
         'Request could not exercise the checks: missing input or usable local response';
     }
     if (status !== 'pass') for (const { name } of request.captures) state.delete(name);
-    if (request.ac) rows.push({ ac: request.ac, status, observed: labelObservation(request.label, observed, privateValues) });
-    else if (status !== 'pass') {
-      rows.push(...blocked(requests.slice(index + 1), `Folder prerequisite at sequence ${request.sequence} did not hold`));
+    if (request.ac) {
+      if (selected) rows.push({ ac: request.ac, status, observed: labelObservation(request.label, observed, privateValues) });
+    } else if (status !== 'pass') {
+      const remaining = requests.slice(index + 1).filter(req => !selectedAcs || (req.ac && selectedAcs.has(req.ac)));
+      rows.push(...blocked(remaining, `Folder prerequisite at sequence ${request.sequence} did not hold`));
       break;
     }
   }
   return rows;
 }
 
-async function run(ticket, manifest, env) {
-  const specs = manifest.folders.flatMap(folder => Object.values(folder.requests));
+async function run(ticket, manifest, env, diagFile) {
+  const selectedAcs = env.PROOF_ACS ? new Set(env.PROOF_ACS.split(',').filter(Boolean)) : null;
+  const specs = manifest.folders.flatMap(folder => Object.values(folder.requests))
+    .filter(spec => !selectedAcs || (spec.ac && selectedAcs.has(spec.ac)));
+  if (selectedAcs && !specs.length) return [];
   let parser;
   try {
     if (require('@usebruno/lang/package.json').version !== '0.36.0') throw new Error();
@@ -191,7 +225,7 @@ async function run(ticket, manifest, env) {
   try { runtimeHeaders = readAuthHeaders(env.PROOF_API_HEADERS, origins); } catch { /* authenticated folders will block */ }
   const privateValues = [...globals.values(), ...Object.values(runtimeHeaders ?? {}).flatMap(Object.values)]
     .filter(Boolean).map(value => value.toLowerCase());
-  const config = { origins, globals, runtimeHeaders, privateValues, csvDir: env.PROOF_CSV_DIR };
+  const config = { origins, globals, runtimeHeaders, privateValues, csvDir: env.PROOF_CSV_DIR, selectedAcs, diagFile };
   const rows = [];
   for (const folder of manifest.folders) rows.push(...await runFolder(ticket, folder, parser, config));
   return rows;
@@ -203,8 +237,14 @@ async function main() {
   if (extra.length || !ticketArg || !isAbsolute(ticketArg) || !env.PROOF_RESULTS || !isAbsolute(env.PROOF_RESULTS)) {
     throw new Error();
   }
+  const realRunDir = env.PROOF_RUN_DIR !== undefined ? await realpath(env.PROOF_RUN_DIR) : null;
   if (env.PROOF_RUN_DIR !== undefined && (!isAbsolute(env.PROOF_RUN_DIR) ||
-      escapes(await realpath(env.PROOF_RUN_DIR), await realpath(dirname(env.PROOF_RESULTS))))) throw new Error();
+      escapes(realRunDir, await realpath(dirname(env.PROOF_RESULTS))))) throw new Error();
+  let diagFile;
+  if (env.PROOF_DIAGNOSTICS_DIR && isAbsolute(env.PROOF_DIAGNOSTICS_DIR)) {
+    const realDiag = await realpath(env.PROOF_DIAGNOSTICS_DIR).catch(() => null);
+    if (realDiag && (!realRunDir || !escapes(realRunDir, realDiag))) diagFile = join(realDiag, 'api.log');
+  }
   const ticket = await realpath(ticketArg);
   const manifest = await loadManifest(ticket);
   const out = await open(env.PROOF_RESULTS, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND |
@@ -212,7 +252,7 @@ async function main() {
   try {
     const info = await out.stat();
     if (!info.isFile() || info.nlink !== 1) throw new Error();
-    const rows = await run(ticket, manifest, env);
+    const rows = await run(ticket, manifest, env, diagFile);
     await out.writeFile(rows.map(row => `${JSON.stringify(row)}\n`).join(''));
   } finally {
     await out.close();

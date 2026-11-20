@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFile, link, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, link, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { recordRun, unindexedRunDirs } from '../lib/runs.mjs';
 import { run } from '../run.mjs';
 
 const ticket = 'ACME-1';
@@ -244,6 +245,14 @@ test('one capture and one run: allowlisted env, scoped credentials, private CSVs
   assert.doesNotMatch(report, /fake-fixture|private-csv-record|fake-ambient-secret|fake-runtime-secret|fake-api/);
   assert.match(report, /redacted local credential/);
   assert.deepEqual(await readdir(join(runResult.reportPath, '..')), ['report.md']);
+  const index = JSON.parse(await readFile(join(root, '.proofs-out', 'runs.json'), 'utf8'));
+  const [[runId, entry]] = Object.entries(index[ticket]);
+  assert.equal(runResult.reportPath, join(root, '.proofs-out', ticket, runId, 'report.md'));
+  assert.equal(entry.type, 'worktree');
+  assert.equal(entry.exitCode, 0);
+  assert.deepEqual(entry.args, [...args, '--runtime', 'runtime.mjs']);
+  assert.equal(entry.worktrees[0].sha, sha);
+  assert.doesNotMatch(JSON.stringify(index), /fake-fixture|fake-ambient-secret|fake-runtime-secret|fake-api/);
 });
 
 test('proof inputs digest ignores app revisions and runtime options but detects AC and CSV edits', async t => {
@@ -848,7 +857,13 @@ test('a ticket in the harness\'s own .proofs/ is found first, and its report goe
   const id = `HLOCAL-${process.pid}`;
   const inputs = join(harness, '.proofs', id);
   const outputs = join(harness, '.proofs-out', id);
-  t.after(() => Promise.all([rm(inputs, { recursive: true, force: true }), rm(outputs, { recursive: true, force: true })]));
+  const index = join(harness, '.proofs-out', 'runs.json');
+  const forgetRuns = async () => {
+    const runs = JSON.parse(await readFile(index, 'utf8').catch(() => '{}'));
+    delete runs[id];
+    await (Object.keys(runs).length ? writeFile(index, JSON.stringify(runs, null, 2)) : rm(index, { force: true }));
+  };
+  t.after(() => Promise.all([rm(inputs, { recursive: true, force: true }), rm(outputs, { recursive: true, force: true }), forgetRuns()]));
   await mkdir(join(inputs, 'api'), { recursive: true });
   await writeFile(join(inputs, 'manifest.json'), JSON.stringify({ acs: [{ id: 'AC1', claim: 'harness-local claim' }] }));
 
@@ -877,4 +892,146 @@ test('a ticket in the harness\'s own .proofs/ is found first, and its report goe
   assert.doesNotMatch(report, /workspace claim/);
   await rm(inputs, { recursive: true, force: true });
   await assert.rejects(run([id, '--url', 'https://trips.example.test', '--plan'], { workspace: empty, parentEnv: {} }), /input directory must be an existing directory/);
+});
+
+test('recording a run drops index entries older than 30 days and leaves run folders alone', async t => {
+  const out = await mkdtemp(join(tmpdir(), 'proof-runs-'));
+  t.after(() => rm(out, { recursive: true, force: true }));
+  const DAY = 24 * 60 * 60 * 1000;
+  const now = Date.parse('2026-12-01T00:00:00Z');
+  const at = days => ({ startedAt: new Date(now - days * DAY).toISOString() });
+  await mkdir(join(out, 'T-1', 'old-run'), { recursive: true });
+  await writeFile(join(out, 'runs.json'), JSON.stringify({ 'T-1': { old: at(31), recent: at(29) }, 'T-2': { older: at(45) } }));
+  await recordRun(out, 'T-3', 'fresh', at(0), now);
+  const index = JSON.parse(await readFile(join(out, 'runs.json'), 'utf8'));
+  assert.deepEqual(Object.keys(index).sort(), ['T-1', 'T-3']);
+  assert.deepEqual(Object.keys(index['T-1']), ['recent']);
+  assert.deepEqual(await readdir(join(out, 'T-1')), ['old-run'], 'run folders are not deleted');
+  assert.ok(!(await readdir(out)).includes('.runs.lock'));
+});
+
+test('prune.mjs lists unindexed run folders, deletes them only with --yes, and spares indexed, young and foreign folders', async t => {
+  const out = await mkdtemp(join(tmpdir(), 'proof-prune-'));
+  t.after(() => rm(out, { recursive: true, force: true }));
+  const prune = fileURLToPath(new URL('../prune.mjs', import.meta.url));
+  const [kept, orphan, young] = ['aaaaaaaa', 'bbbbbbbb', 'cccccccc'].map(x => `${x}-aaaa-aaaa-aaaa-aaaaaaaaaaaa`);
+  const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+  for (const [id, when] of [[kept, old], [orphan, old], [young, new Date()]]) {
+    await mkdir(join(out, 'T-1', id), { recursive: true });
+    await utimes(join(out, 'T-1', id), when, when);
+  }
+  await mkdir(join(out, 'T-1', 'notes'), { recursive: true });
+  await utimes(join(out, 'T-1', 'notes'), old, old);
+
+  assert.throws(() => execFileSync('node', [prune, '--out', out], { stdio: 'pipe' }), /runs\.json/, 'no index, no deletion');
+  assert.deepEqual((await readdir(join(out, 'T-1'))).sort(), [kept, orphan, young, 'notes'].sort());
+
+  await writeFile(join(out, 'runs.json'), JSON.stringify({ 'T-1': { [kept]: { startedAt: old.toISOString() } } }));
+  assert.deepEqual((await unindexedRunDirs(out)).map(({ id }) => id), [orphan]);
+  const dry = execFileSync('node', [prune, '--out', out], { encoding: 'utf8' });
+  assert.match(dry, /would delete T-1\/bbbbbbbb/);
+  assert.equal((await readdir(join(out, 'T-1'))).length, 4, 'a dry run deletes nothing');
+
+  execFileSync('node', [prune, '--out', out, '--yes']);
+  assert.deepEqual((await readdir(join(out, 'T-1'))).sort(), [kept, young, 'notes'].sort());
+});
+
+test('--ac filters adapters, skips unselected ACs, records phase timings, and rejects unknown ACs', async t => {
+  const { root, manifest, save } = await workspace(t);
+  manifest.acs = [{ id: 'AC1', claim: 'First claim' }, { id: 'AC2', claim: 'Second claim' }];
+  await save();
+  await adapter(root, 'bdd');
+  await adapter(root, 'api');
+  const seen = [];
+  const plan = await run([ticket, '--url', 'https://trips.example.test', '--ac', 'AC1', '--plan'], { workspace: root, parentEnv: {} });
+  assert.match(plan.plan, /ACs: 2 \(filtered: AC1\)/);
+  await assert.rejects(run([ticket, '--url', 'https://trips.example.test', '--ac', 'AC99', '--plan'], { workspace: root, parentEnv: {} }), /Unknown AC in --ac: AC99/);
+  await assert.rejects(run([ticket, '--url', 'https://trips.example.test', '--ac', 'bad/ac', '--plan'], { workspace: root, parentEnv: {} }), /--ac takes comma-separated/);
+
+  const outcome = await run([ticket, '--url', 'https://trips.example.test', '--ac', 'AC1'], {
+    workspace: root, parentEnv: { PATH: process.env.PATH },
+    invoke: async ({ name, env }) => {
+      seen.push({ name, acs: env.PROOF_ACS });
+      if (name === 'bdd') await writeResults(env.PROOF_RESULTS, [result('pass', 'one check', 'AC1')]);
+      else await writeFile(env.PROOF_RESULTS, '');
+      return 0;
+    },
+  });
+  assert.equal(outcome.exitCode, 0);
+  assert.equal(outcome.diagnosticsDir, undefined, 'passing run without --debug leaves no diagnostics');
+  assert.deepEqual(seen, [{ name: 'bdd', acs: 'AC1' }, { name: 'api', acs: 'AC1' }]);
+  const report = await readFile(outcome.reportPath, 'utf8');
+  assert.match(report, /Filtered ACs: `AC1`/);
+  assert.match(report, /^Duration: \d+\.\ds \(startup \d+\.\ds, bdd \d+\.\ds, api \d+\.\ds, teardown \d+\.\ds\)$/m);
+  assert.match(report, /^\| AC1 — First claim \| Pass — bdd: pass/m);
+  assert.match(report, /^\| AC2 — Second claim \| Skipped — filtered out by --ac \|$/m);
+  const runs = JSON.parse(await readFile(join(root, '.proofs-out', 'runs.json'), 'utf8'));
+  const entry = Object.values(runs[ticket])[0];
+  assert.deepEqual(entry.selectedAcs, ['AC1']);
+  assert.equal(typeof entry.durationMs, 'number');
+  assert.equal(typeof entry.timings?.startupMs, 'number');
+  assert.equal(typeof entry.timings?.adapters?.bdd, 'number');
+  assert.equal(typeof entry.timings?.teardownMs, 'number');
+});
+
+test('private diagnostics retain service.log on startup/--check failure and adapter logs on --debug without leaking into report.md', async t => {
+  const { root, manifest, save } = await workspace(t);
+  builtIn(manifest, { app: { app: names[0], start: 'echo SECRET_STARTUP_ERR >&2; exit 7' } });
+  await save();
+  await adapter(root);
+
+  const checkFail = await run([ticket, '--check', '--worktree', names[0]], { workspace: root, parentEnv: { PATH: process.env.PATH } });
+  assert.equal(checkFail.exitCode, 1);
+  assert.ok(checkFail.diagnosticsDir, '--check failure retains diagnosticsDir');
+  const checkLog = await readFile(join(checkFail.diagnosticsDir, 'service.log'), 'utf8');
+  assert.match(checkLog, /SECRET_STARTUP_ERR/);
+  assert.equal((await stat(join(checkFail.diagnosticsDir, 'service.log'))).mode & 0o777, 0o600);
+
+  const runFail = await run([ticket, '--worktree', names[0]], { workspace: root, parentEnv: { PATH: process.env.PATH } });
+  assert.equal(runFail.exitCode, 1);
+  assert.ok(runFail.diagnosticsDir);
+  assert.match(await readFile(join(runFail.diagnosticsDir, 'service.log'), 'utf8'), /SECRET_STARTUP_ERR/);
+  assert.doesNotMatch(await readFile(runFail.reportPath, 'utf8'), /SECRET_STARTUP_ERR/, 'report stays redacted');
+
+  const debugPass = await run([ticket, '--url', 'https://trips.example.test', '--debug'], {
+    workspace: root, parentEnv: { PATH: process.env.PATH },
+    invoke: async ({ env }) => {
+      assert.equal(env.PROOF_DEBUG, '1');
+      await writeFile(join(env.PROOF_DIAGNOSTICS_DIR, 'debug.log'), 'debug-trace-line\n');
+      await writeResults(env.PROOF_RESULTS, [result()]);
+      return 0;
+    },
+  });
+  assert.equal(debugPass.exitCode, 0);
+  assert.ok(debugPass.diagnosticsDir);
+  assert.match(await readFile(join(debugPass.diagnosticsDir, 'bdd', 'debug.log'), 'utf8'), /debug-trace-line/);
+  assert.match(await readFile(debugPass.reportPath, 'utf8'), /--debug/);
+});
+
+test('--serve keeps the local sandbox running until aborted and prints iterate command', async t => {
+  const { root, manifest, save } = await workspace(t);
+  builtIn(manifest, { app: { app: names[0], start: SERVER } });
+  await save();
+  await adapter(root);
+  await assert.rejects(run([ticket, '--serve', '--url', 'http://127.0.0.1:8080'], { workspace: root, parentEnv: {} }), /do not combine it with --url/);
+  await assert.rejects(run([ticket, '--serve', '--worktree', names[0], '--check'], { workspace: root, parentEnv: {} }), /do not combine it with --plan, --check, --only or --ac/);
+
+  const controller = new AbortController();
+  let observedReady;
+  const outcome = await run([ticket, '--serve', '--worktree', names[0]], {
+    workspace: root,
+    parentEnv: { PATH: process.env.PATH },
+    signal: controller.signal,
+    onReady: async info => {
+      observedReady = info;
+      const res = await fetch(info.urls.PROOF_APP_URL);
+      assert.equal(res.status, 200);
+      controller.abort();
+    },
+  });
+  assert.equal(outcome.exitCode, 0);
+  assert.equal(outcome.served, true);
+  assert.match(observedReady.message, /Sandbox ready for ACME-1/);
+  assert.match(observedReady.message, /Iterate with: node proofs\/run\.mjs ACME-1 --url app=http:\/\/127\.0\.0\.1:\d+/);
+  assert.deepEqual(await readdir(join(root, '.proofs-out', ticket)), [], 'clean --serve exit leaves no leftover run dir');
 });

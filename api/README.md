@@ -91,11 +91,12 @@ The adapter reports HTTP status and check counts or ordinals, not raw paths, bod
 
 ## Run
 
-Run the proof against one target using the [run commands](../README.md#run-a-ticket). `--only api` runs just this adapter:
+Run the proof against one target using the [run commands](../README.md#run-a-ticket). `--only api` runs just this adapter; `--ac <id,...>` filters to matching AC requests while automatically keeping folder prerequisites and variable captures, and `--debug` (or any failure) retains private failure details in `<run-dir>/diagnostics/api/api.log` (`0o600`) without leaking raw values into `report.md`:
 
 ```bash
 node "$HARNESS/run.mjs" TEAM-42 --worktree "$CHECKOUT" --only api      # a local checkout, started by the runtime
 node "$HARNESS/run.mjs" TEAM-42 --url https://dev.example.com --only api   # a running environment
+node "$HARNESS/run.mjs" TEAM-42 --url http://127.0.0.1:4100 --only api --ac AC1 --debug
 ```
 
 To compare a change with its base, run the same ticket once on each checkout and read the two reports.

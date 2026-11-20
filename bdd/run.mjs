@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
-import { constants } from 'node:fs';
-import { mkdir, mkdtemp, open, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { constants, createWriteStream } from 'node:fs';
+import { cp, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
@@ -54,15 +54,24 @@ async function taggedCriteria(dir) {
   return found;
 }
 
-function cli(bin, args, cwd, env) {
-  return new Promise(resolve => {
-    // Framework errors can contain selectors, credentials or response data.
-    const child = spawn(process.execPath, [join(directory, 'node_modules', '.bin', bin), ...args], {
-      cwd, env, stdio: 'ignore',
+async function cli(bin, args, cwd, env, logPath) {
+  let log;
+  if (logPath) {
+    log = createWriteStream(logPath, { mode: 0o600, flags: 'a' });
+    await new Promise(resolve => log.once('open', resolve));
+  }
+  try {
+    return await new Promise(resolve => {
+      // Framework errors can contain selectors, credentials or response data, so write only to private local diagnostics.
+      const child = spawn(process.execPath, [join(directory, 'node_modules', '.bin', bin), ...args], {
+        cwd, env, stdio: log ? ['ignore', log, log] : 'ignore',
+      });
+      child.once('error', () => resolve(1));
+      child.once('exit', code => resolve(code ?? 1));
     });
-    child.once('error', () => resolve(1));
-    child.once('exit', code => resolve(code ?? 1));
-  });
+  } finally {
+    if (log) await new Promise(resolve => log.end(resolve));
+  }
 }
 
 async function main() {
@@ -71,13 +80,33 @@ async function main() {
   if (args.length || ![ticket, results, runDir].every(value => value && isAbsolute(value))) {
     throw new Error('Expected absolute ticket directory, PROOF_RESULTS and PROOF_RUN_DIR');
   }
-  const resultDir = relative(await realpath(runDir), await realpath(dirname(results)));
+  const realRunDir = await realpath(runDir);
+  const resultDir = relative(realRunDir, await realpath(dirname(results)));
   if (resultDir === '..' || resultDir.startsWith(`..${sep}`) || isAbsolute(resultDir)) {
     throw new Error('Expected results inside private run directory');
   }
+  let diagDir;
+  if (process.env.PROOF_DIAGNOSTICS_DIR && isAbsolute(process.env.PROOF_DIAGNOSTICS_DIR)) {
+    const relDiag = relative(realRunDir, await realpath(process.env.PROOF_DIAGNOSTICS_DIR).catch(() => ''));
+    if (relDiag && relDiag !== '..' && !relDiag.startsWith(`..${sep}`) && !isAbsolute(relDiag)) {
+      diagDir = process.env.PROOF_DIAGNOSTICS_DIR;
+    }
+  }
+  const debug = process.env.PROOF_DEBUG === '1' && Boolean(diagDir);
   const features = join(ticket, 'features');
-  const acs = await taggedCriteria(features);
-  if (!acs.size) throw new Error('No tagged acceptance criteria');
+  const allAcs = await taggedCriteria(features);
+  if (!allAcs.size) throw new Error('No tagged acceptance criteria');
+  const selectedAcs = process.env.PROOF_ACS ? new Set(process.env.PROOF_ACS.split(',').filter(Boolean)) : null;
+  const acs = selectedAcs ? new Set([...allAcs].filter(ac => selectedAcs.has(ac))) : allAcs;
+  if (!acs.size) {
+    const output = await open(results, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+    try {
+      const info = await output.stat();
+      if (!info.isFile() || info.nlink !== 1) throw new Error('Expected a private regular result file');
+      await output.truncate(0);
+    } finally { await output.close(); }
+    return;
+  }
 
   let scratch, proxy, reason = 'invalid_runtime_origin';
   const rows = [];
@@ -103,6 +132,8 @@ async function main() {
       PROOF_RUN_DIR: scratch,
       PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH ?? join(homedir(), '.cache', 'ms-playwright'),
       PROOF_BDD_EVIDENCE: join(scratch, 'evidence.json'),
+      ...(diagDir ? { PROOF_DIAGNOSTICS_DIR: diagDir } : {}),
+      ...(debug ? { PROOF_DEBUG: '1' } : {}),
     });
     // Test configuration and generated specs never live in an authoring directory.
     await writeFile(join(scratch, 'playwright.config.mjs'), `
@@ -119,12 +150,14 @@ async function main() {
       })});
 
       export default defineConfig({
-        testDir, workers: 1, retries: 0, globalTimeout: 240000, timeout: 90000,
-        outputDir: 'test-results', preserveOutput: 'never',
+        testDir, workers: 1, retries: 0, globalTimeout: 270000, timeout: 90000,
+        outputDir: 'test-results', preserveOutput: ${JSON.stringify(debug ? 'failures-only' : 'never')},
         reporter: [[${JSON.stringify(join(directory, 'reporter.mjs'))}]],
         use: {
           browserName: 'chromium', headless: true,
-          trace: 'off', screenshot: 'off', video: 'off', serviceWorkers: 'block',
+          trace: ${JSON.stringify(debug ? 'retain-on-failure' : 'off')},
+          screenshot: ${JSON.stringify(debug ? 'only-on-failure' : 'off')},
+          video: 'off', serviceWorkers: 'block',
           ignoreHTTPSErrors: ${process.env.PROOF_TARGET !== '1' || process.env.PROOF_INSECURE_TLS === '1'},
           proxy: { server: ${JSON.stringify(proxy.url)}, bypass: '<-loopback>' },
           launchOptions: { args: ['--disable-quic', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'] },
@@ -132,13 +165,20 @@ async function main() {
       });
     `, { mode: 0o600 });
     reason = 'bdd_generation_failed';
-    if (await cli('bddgen', [], scratch, env) === 0) {
-      const code = await cli('playwright', ['test'], scratch, env);
+    if (await cli('bddgen', [], scratch, env, diagDir ? join(diagDir, 'bddgen.log') : undefined) === 0) {
+      const code = await cli('playwright', ['test'], scratch, env, diagDir ? join(diagDir, 'playwright.log') : undefined);
       reason = code === 0 ? 'scenario_not_run' : 'bdd_execution_failed';
+      if (debug) {
+        const pwResults = join(scratch, 'test-results');
+        const entries = await readdir(pwResults).catch(() => []);
+        if (entries.length) await cp(pwResults, join(diagDir, 'playwright'), { recursive: true }).catch(() => {});
+      }
       const evidence = JSON.parse(await readFile(env.PROOF_BDD_EVIDENCE, 'utf8'));
       const complete = evidence.complete && (code === 0 ? evidence.status === 'passed' : evidence.status === 'failed');
+      const incompleteAcs = new Set(evidence.rows.filter(row => row.status !== 'pass').map(row => row.ac));
       for (const row of evidence.rows) {
-        rows.push(!complete && row.status === 'pass' ? { ac: row.ac, ...blockRow('bdd_execution_incomplete') } : row);
+        const invalidate = !complete && row.status === 'pass' && (evidence.status !== 'timedout' || incompleteAcs.has(row.ac));
+        rows.push(invalidate ? { ac: row.ac, ...blockRow('bdd_execution_incomplete') } : row);
       }
     }
   } catch {
