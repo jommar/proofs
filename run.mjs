@@ -13,7 +13,8 @@ import { isAncestor, record, resolveInputs } from './lib/inputs.mjs';
 import { appendLedger, ledgerEntry, readLedger } from './lib/ledger.mjs';
 import { summarize } from './lib/summary.mjs';
 import { localOrigin, proofContextKey, proofUrlKey } from './lib/origins.mjs';
-import { describeRun, recordRun } from './lib/runs.mjs';
+import { startProgress } from './lib/progress.mjs';
+import { describeProgress, describeRun, recordRun } from './lib/runs.mjs';
 import { readProofInputs, stageProofInputs, unlockProofInputs } from './lib/snapshot.mjs';
 
 const CREDENTIAL_KEYS = ['PROOF_USERNAME', 'PROOF_PASSWORD'];
@@ -255,12 +256,13 @@ async function cleanupScratch(scratch, phases) {
   }
 }
 
-async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, adapterTimeoutMs, parentEnv, signal }) {
+async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, adapterTimeoutMs, parentEnv, signal, onPhase }) {
   const outcome = { rows: [], issues: [], warnings: [], invoked: false, timings: { adapters: {} } };
   const sandboxDir = join(dir, 'sandbox');
   const checksDir = join(dir, 'checks');
   let sandbox;
   let stage = 'sandbox startup';
+  await onPhase?.('startup');
   const startupStart = Date.now();
   try {
     signal.throwIfAborted();
@@ -298,6 +300,7 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
     const adapters = input.check || outcome.issues.length || input.runAcs?.length === 0 ? [] : input.adapters;
     for (const adapter of adapters) {
       signal.throwIfAborted();
+      await onPhase?.(adapter.name);
       const adapterStart = Date.now();
       const adapterDiag = await privateDir(join(diagRoot, adapter.name), true);
       const env = {
@@ -353,6 +356,7 @@ async function runSide({ side, dir, input, id, dataset, startSandbox, invoke, ad
     if ((sandbox && typeof sandbox.close !== 'function') || (!sandbox && error instanceof AggregateError)) outcome.retainSandbox = true;
   } finally {
     if (typeof sandbox?.close === 'function') {
+      await onPhase?.('teardown');
       const teardownStart = Date.now();
       try { await sandbox.close(); } catch { outcome.retainSandbox = true; }
       outcome.timings.teardownMs = Date.now() - teardownStart;
@@ -543,7 +547,10 @@ export async function run(args, {
     return { ...served, ...(diagnosticsDir ? { diagnosticsDir } : {}) };
   }
 
-  const phases = await runPhases(input, snapshot, id, scratch, { parentEnv, signal, captureDataset, startSandbox, invoke, adapterTimeoutMs });
+  // Live progress for the dashboard; a --check run is not indexed, so it shows none.
+  const progress = input.check ? undefined : await startProgress(out, input.ticket, id, phase => describeProgress(input, args, { startedAt, phase }));
+  const phases = await runPhases(input, snapshot, id, scratch, { parentEnv, signal, captureDataset, startSandbox, invoke, adapterTimeoutMs, onPhase: progress?.phase });
+  const progressWarning = await progress?.stop();
   const durationMs = Date.now() - startedMs;
   if (phases.run) phases.run.timings = { ...(phases.run.timings ?? { adapters: {} }), durationMs };
 
@@ -595,6 +602,7 @@ export async function run(args, {
   }
   return {
     exitCode, reportPath, runsWarning,
+    ...(progressWarning ? { progressWarning } : {}),
     ...(ledgerWarning ? { ledgerWarning } : {}),
     ...(dashboardPath ? { dashboardPath } : {}),
     ...(dashboardWarning ? { dashboardWarning } : {}),
@@ -623,6 +631,7 @@ async function main() {
     }
     if (result.diagnosticsDir) console.error(`Diagnostics: ${result.diagnosticsDir}`);
     if (result.runsWarning) console.error(result.runsWarning);
+    if (result.progressWarning) console.error(result.progressWarning);
     if (result.ledgerWarning) console.error(result.ledgerWarning);
     if (result.dashboardWarning) console.error(result.dashboardWarning);
     process.exitCode = result.exitCode;

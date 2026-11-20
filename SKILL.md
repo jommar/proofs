@@ -45,7 +45,9 @@ From the directory your paths are relative to (or pass `--workspace <path>`):
    Fix all problems before going on.
 2. **Check:** same command with `--check` prints `ready`, `ready with warnings` or `NOT READY — <causes>`, to tell a
    broken environment from a failing AC. `HTTP 401/403` means reachable but not logged in; the login is not verified.
-3. **Run:** drop the flag, then read `.proofs-out/<ID>/<run-id>/report.md`.
+3. **Run:** drop the flag, then read `.proofs-out/<ID>/<run-id>/report.md`. While it runs, `.proofs-out/dashboard.html`
+   shows it as `running` with its current phase (`setup`, `startup`, `bdd`, `api`, `teardown`) and elapsed time, and
+   reloads itself every few seconds; a run whose process died shows as `interrupted`.
 
 Targets and flags:
 

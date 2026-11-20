@@ -61,6 +61,8 @@ A startup failure in a report names the service, step and exit code, for example
 
 `--debug` retains private local diagnostics (`0o600` files under `<run-dir>/diagnostics/`: `service.log`, adapter logs, `bdd-failures.json`, and Playwright failure traces/screenshots) even on a passing run. Any failing or blocked run (including a failed `--check`) automatically retains non-empty diagnostics there while keeping `report.md` strictly redacted. Each report and `runs.json` entry records total and per-phase durations (`startup`, adapters, `teardown`).
 
+While a run is in progress, `runs.json` holds a `running` entry for it (start time, settings, current phase, the runner's pid and a heartbeat updated every 15 seconds) and `.proofs-out/dashboard.html` is rebuilt at each phase (`setup`, `startup`, then each adapter, `teardown`), so the page shows the run, its phase and elapsed time and reloads itself every 5 seconds while anything is running. The entry becomes the normal record when the run ends. A running entry whose process is gone or whose heartbeat is over a minute old shows as `interrupted`. Progress is phase-level, not per AC, and a failed progress write is only a warning. `--check` and `--serve` show no progress, and the ledger only ever gets finished runs.
+
 ## Test a local checkout
 
 `--worktree [app=]<dir>` tests one checkout. The directory must be a Git checkout root; its committed `HEAD` is exported and started with the manifest's `runtimeOptions.services` recipe (see [Built-in runtime](#built-in-runtime)). The report lists each checkout's commit and whether it was clean; uncommitted changes are not tested. Leave the app name off when the manifest has one app; otherwise name each one (`--worktree web=<dir> --worktree api=<dir>`).
@@ -255,13 +257,13 @@ To compare a base and a feature, run the same ticket on each checkout and compar
 | Path | Purpose |
 | --- | --- |
 | `run.mjs` | Main CLI entry point (`--worktree`, `--url`, `--target`, `--persona`, `--source`, `--plan`, `--check`, `--serve`, `--summary`, `--only`, `--ac`, `--debug`). |
-| `lib/` | Argument parsing and offline preflight (`inputs.mjs`), target profiles and capabilities (`targets.mjs`), data sources and qualification (`sources.mjs`), input snapshot/digest (`snapshot.mjs`), origin validation (`origins.mjs`), evidence/report rendering (`evidence.mjs`), `runs.json` index (`runs.mjs`), durable per-ticket ledger (`ledger.mjs`), `--summary` matrix (`summary.mjs`), self-contained HTML dashboard (`dashboard.mjs`). |
+| `lib/` | Argument parsing and offline preflight (`inputs.mjs`), target profiles and capabilities (`targets.mjs`), data sources and qualification (`sources.mjs`), input snapshot/digest (`snapshot.mjs`), origin validation (`origins.mjs`), evidence/report rendering (`evidence.mjs`), `runs.json` index (`runs.mjs`), live run progress (`progress.mjs`), durable per-ticket ledger (`ledger.mjs`), `--summary` matrix (`summary.mjs`), self-contained HTML dashboard (`dashboard.mjs`). |
 | `runtime/` | Built-in local process runtime (`command.mjs`) — see [`runtime/README.md`](runtime/README.md). |
 | `bdd/` | Gherkin + Playwright browser adapter (`run.mjs`, `fixtures.mjs`, `loopback.mjs`, `reporter.mjs`) — see [`bdd/README.md`](bdd/README.md). |
 | `api/` | Declarative Bruno HTTP adapter (`run.mjs`) — see [`api/README.md`](api/README.md). |
-| `test/` | Harness unit/integration tests (`runner.test.mjs`, `targets.test.mjs`, `command-runtime.test.mjs`, `dashboard.test.mjs`). |
+| `test/` | Harness unit/integration tests (`runner.test.mjs`, `targets.test.mjs`, `command-runtime.test.mjs`, `dashboard.test.mjs`, `progress.test.mjs`). |
 | `examples/` | Self-contained end-to-end demo (`built-in-demo.mjs`). |
-| `dashboard.mjs` | Rebuilds the offline `.proofs-out/dashboard.html` dashboard from `runs.json` and redacted `report.md` files (also auto-updated after each run); each run shows the command it was started with, with paths, `--context` values and URL credentials masked. |
+| `dashboard.mjs` | Rebuilds the offline `.proofs-out/dashboard.html` dashboard from `runs.json` and redacted `report.md` files (also auto-updated during and after each run); each run shows the command it was started with, with paths, `--context` values and URL credentials masked. |
 | `prune.mjs` | Cleans unindexed run folders from `.proofs-out/` (`--yes` to delete). |
 
 ## License
