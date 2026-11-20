@@ -152,7 +152,7 @@ Each report has an `## Inputs` section with non-secret inputs only: the target p
 
 ## Summarize a ticket across targets
 
-Every complete run is also appended to `.proofs/<ID>/ledger.json`, beside the ticket's inputs. It holds statuses, target, persona, origins, commits, build, source name and digest, never observed text or secrets, and it is never pruned, so you can track it in Git with the checks. `node proofs/run.mjs <ID> --summary` reads it and prints an AC x target matrix plus a ticket comment in Markdown:
+Every complete run is also appended to `.proofs/<ID>/ledger.json`, beside the ticket's inputs. It holds statuses, target, persona, origins, commits, build, source name, digest and the masked command line, never observed text or secrets, and it is never pruned, so you can track it in Git with the checks. `node proofs/run.mjs <ID> --summary` reads it and prints an AC x target matrix plus a ticket comment in Markdown:
 
 - Only complete runs count; `--ac` and `--debug` runs are left out.
 - Per target it takes the latest run per persona and, per AC, the latest of those where the AC applied.
@@ -261,7 +261,7 @@ To compare a base and a feature, run the same ticket on each checkout and compar
 | `api/` | Declarative Bruno HTTP adapter (`run.mjs`) — see [`api/README.md`](api/README.md). |
 | `test/` | Harness unit/integration tests (`runner.test.mjs`, `targets.test.mjs`, `command-runtime.test.mjs`, `dashboard.test.mjs`). |
 | `examples/` | Self-contained end-to-end demo (`built-in-demo.mjs`). |
-| `dashboard.mjs` | Rebuilds the offline `.proofs-out/dashboard.html` dashboard from `runs.json` and redacted `report.md` files (also auto-updated after each run). |
+| `dashboard.mjs` | Rebuilds the offline `.proofs-out/dashboard.html` dashboard from `runs.json` and redacted `report.md` files (also auto-updated after each run); each run shows the command it was started with, with paths, `--context` values and URL credentials masked. |
 | `prune.mjs` | Cleans unindexed run folders from `.proofs-out/` (`--yes` to delete). |
 
 ## License

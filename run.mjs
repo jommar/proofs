@@ -582,7 +582,7 @@ export async function run(args, {
   }))
     .then(() => undefined, () => 'Run was not added to .proofs-out/runs.json.');
   // The durable ledger feeds --summary; like the index, a failed write is a warning beside the report.
-  const ledgerWarning = await appendLedger(input.ticketDir, input.ticket, ledgerEntry(input, id, { startedAt, exitCode, statuses, build: phases.run.build }))
+  const ledgerWarning = await appendLedger(input.ticketDir, input.ticket, ledgerEntry(input, id, { startedAt, exitCode, statuses, build: phases.run.build, args }))
     .then(() => undefined, () => `Run was not added to .proofs/${input.ticket}/ledger.json.`);
   let dashboardPath;
   let dashboardWarning;
