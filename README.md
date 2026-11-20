@@ -37,6 +37,8 @@ node proofs/run.mjs TEAM-42 --target dev --persona driver           # one person
 node proofs/run.mjs TEAM-42 --summary                               # AC x target matrix and a ticket comment from every recorded run
 ```
 
+One ticket may have several check folders, for example one per app (`TEAM-42` and `TEAM-42-web`). Running `TEAM-42` covers only its own folder, so any run of it (including `--plan`, `--check` and `--summary`) prints `Note: sibling proof folder(s) for the same ticket: TEAM-42-web. Run each ID separately.` The note is informational and does not change the exit code.
+
 A run without `--url` or `--worktree` fails with `Give a target`. Add `--workspace <path>` if you are not in the directory the paths are relative to. Read `.proofs-out/TEAM-42/<run-id>/report.md`: one row per AC with a single Result column.
 
 | Result | Meaning |

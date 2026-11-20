@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { copyFile, link, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -471,6 +471,27 @@ test('the plan and report digests match for the same checks, and the line names 
   assert.equal(bothAdapters, 'bdd, api');
   assert.notEqual(both, planned);
   assert.deepEqual(digestOf((await execute(root, {}, [ticket, '--plan', '--only', 'bdd'])).plan), [planned, 'bdd']);
+});
+
+test('sibling folders of the same ticket are named in one note that changes no exit code', async t => {
+  const { root } = await workspace(t);
+  await adapter(root);
+  const note = `Note: sibling proof folder(s) for the same ticket: ${ticket}-web, ${ticket}-zeta. Run each ID separately.`;
+  const alone = await execute(root, {}, [ticket, '--plan']);
+  assert.equal(alone.note, undefined);
+  for (const name of [`${ticket}-zeta`, `${ticket}-web`, `${ticket}0`, `X${ticket}-web`]) await mkdir(join(root, '.proofs', name));
+  await writeFile(join(root, '.proofs', `${ticket}-file`), 'not a folder');
+  const plan = await execute(root, {}, [ticket, '--plan']);
+  assert.equal(plan.note, note);
+  assert.equal(plan.exitCode, alone.exitCode);
+  assert.equal((await execute(root, fakes(), [ticket, '--check'])).note, note);
+  const outcome = await execute(root, fakes());
+  assert.equal(outcome.note, note);
+  assert.equal(outcome.exitCode, 0);
+  assert.equal((await run([ticket, '--summary'], { workspace: root })).note, note);
+  const cli = spawnSync(process.execPath, [runner, ticket, '--workspace', root, '--runtime', 'runtime.mjs', ...checkouts, '--plan'], { encoding: 'utf8' });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.equal(cli.stderr, `${note}\n`);
 });
 
 test('capture, start, env validation, and cleanup errors surface separately without leaked exception text', async t => {

@@ -10,6 +10,8 @@ this file is the procedure.
 
 `<ID>` is the ticket key (for example `TEAM-42`): take it from the prompt, or from the branch or worktree name;
 if it is ambiguous, ask. It names the check folder `.proofs/<ID>/` and the `run.mjs` argument, and must match exactly.
+A ticket can have sibling folders such as `.proofs/<ID>-web/` (one per app); a run of `<ID>` prints a
+`Note: sibling proof folder(s) ...` line naming them. "Test <ID>" means every one of them: run each ID separately.
 
 ## Step 1: gather the ACs from the ticket
 

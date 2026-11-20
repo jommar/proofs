@@ -498,11 +498,18 @@ async function runPhases(input, snapshot, id, scratch, options) {
   return phases;
 }
 
-export async function run(args, {
-  workspace = process.cwd(), parentEnv = process.env, signal = new AbortController().signal,
+const siblingNote = siblings => `Note: sibling proof folder(s) for the same ticket: ${siblings.join(', ')}. Run each ID separately.`;
+
+export async function run(args, deps = {}) {
+  const input = await resolveInputs(args, deps.workspace ?? process.cwd(), deps.parentEnv ?? process.env);
+  const result = await runInputs(input, args, deps);
+  return input.siblings.length ? { ...result, note: siblingNote(input.siblings) } : result;
+}
+
+async function runInputs(input, args, {
+  parentEnv = process.env, signal = new AbortController().signal,
   captureDataset, startSandbox, invoke = invokeChild, adapterTimeoutMs = ADAPTER_TIMEOUT_MS, onReady, cleanup = cleanupScratch,
 } = {}) {
-  const input = await resolveInputs(args, workspace, parentEnv);
   if (input.summary) {
     const entries = await readLedger(input.ticketDir);
     if (!entries.length) return { exitCode: 1, summary: `No runs recorded for ${input.ticket} yet (.proofs/${input.ticket}/ledger.json).` };
@@ -617,6 +624,7 @@ async function main() {
   process.on('SIGTERM', cancel);
   try {
     const result = await run(process.argv.slice(2), { signal: controller.signal });
+    if (result.note) console.error(result.note);
     if (result.summary !== undefined) {
       console.log(result.summary);
       process.exitCode = result.exitCode;
