@@ -494,6 +494,38 @@ test('sibling folders of the same ticket are named in one note that changes no e
   assert.equal(cli.stderr, `${note}\n`);
 });
 
+test('--help prints grouped flags, examples and the workspace tickets with their apps, and exits 0', async t => {
+  const { root, manifest, save } = await workspace(t);
+  manifest.runtimeOptions = { services: { web: { app: 'web_ui', start: 'node a.js' }, worker: { app: 'web_ui' }, api: { start: 'node b.js' } } };
+  await save();
+  await mkdir(join(root, '.proofs', 'NO-MANIFEST'));
+  await mkdir(join(root, '.proofs', 'BROKEN-1'));
+  await writeFile(join(root, '.proofs', 'BROKEN-1', 'manifest.json'), '{ not json');
+  for (const args of [['--help'], ['-h'], [ticket, '--plan', '--help']]) {
+    const { exitCode, help } = await run(args, { workspace: root, parentEnv: { SECRET_VALUE: 'fake-help-secret' } });
+    assert.equal(exitCode, 0);
+    for (const heading of ['What to run:', 'Where to run:', 'Which user and data:', 'Diagnostics:', 'Examples:']) assert.ok(help.includes(`\n${heading}\n`), heading);
+    assert.match(help, /^ {2}--worktree \[app=\]<dir> +local: /m);
+    assert.match(help, /--target dev --context tenant=<dummy-client>/);
+    assert.ok(help.includes(`Tickets in ${join(root, '.proofs')}/`));
+    assert.match(help, new RegExp(`^ {2}${ticket} +--worktree web_ui=<dir> --worktree api=<dir>$`, 'm'));
+    assert.match(help, /^ {2}BROKEN-1$/m, 'an unreadable manifest lists the name only');
+    assert.doesNotMatch(help, /NO-MANIFEST|fake-help-secret/);
+    assert.match(help, /README\.md \(reference\)/);
+  }
+  assert.doesNotMatch((await run(['--help'], { workspace: root })).help, /Workspace guide/);
+  await writeFile(join(root, 'PROOFS-GUIDE.md'), '# guide\n');
+  assert.ok((await run(['--help'], { workspace: root })).help.includes(`Workspace guide: ${join(root, 'PROOFS-GUIDE.md')}`));
+  const cli = spawnSync(process.execPath, [runner, '--help', '--workspace', root], { encoding: 'utf8' });
+  assert.equal(cli.status, 0);
+  assert.match(cli.stdout, /^Usage: /);
+  assert.equal(cli.stderr, '');
+  const bad = spawnSync(process.execPath, [runner, '--bogus'], { cwd: root, encoding: 'utf8' });
+  assert.equal(bad.status, 1);
+  assert.match(bad.stderr, /^Usage: .*\n.*--summary.*\n.*--help\n$/);
+  assert.equal(bad.stdout, '');
+});
+
 test('capture, start, env validation, and cleanup errors surface separately without leaked exception text', async t => {
   const { root } = await workspace(t);
   await adapter(root);

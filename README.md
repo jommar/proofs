@@ -35,7 +35,10 @@ node proofs/run.mjs TEAM-42 --url http://127.0.0.1:4100 --ac AC1 --debug  # iter
 node proofs/run.mjs TEAM-42 --target dev --plan                     # a profile supplies urls, context, logins and capabilities
 node proofs/run.mjs TEAM-42 --target dev --persona driver           # one persona per run
 node proofs/run.mjs TEAM-42 --summary                               # AC x target matrix and a ticket comment from every recorded run
+node proofs/run.mjs --help                                          # flags by purpose, examples, and the tickets in .proofs/
 ```
+
+`--help` (or `-h`) prints the flags grouped by what to run, where, which user and data, and diagnostics, example commands, and then the ticket folders found in `<workspace>/.proofs/` and the harness's own `.proofs/`, each with the `--worktree <app>=<dir>` names its manifest's `runtimeOptions.services` expect (read as JSON; nothing is executed and no environment value is shown). It exits 0; bad arguments print the usage line and exit 1.
 
 One ticket may have several check folders, for example one per app (`TEAM-42` and `TEAM-42-web`). Running `TEAM-42` covers only its own folder, so any run of it (including `--plan`, `--check` and `--summary`) prints `Note: sibling proof folder(s) for the same ticket: TEAM-42-web. Run each ID separately.` The note is informational and does not change the exit code.
 
@@ -260,8 +263,8 @@ To compare a base and a feature, run the same ticket on each checkout and compar
 
 | Path | Purpose |
 | --- | --- |
-| `run.mjs` | Main CLI entry point (`--worktree`, `--url`, `--target`, `--persona`, `--source`, `--plan`, `--check`, `--serve`, `--summary`, `--only`, `--ac`, `--debug`). |
-| `lib/` | Argument parsing and offline preflight (`inputs.mjs`), target profiles and capabilities (`targets.mjs`), data sources and qualification (`sources.mjs`), input snapshot/digest (`snapshot.mjs`), origin validation (`origins.mjs`), evidence/report rendering (`evidence.mjs`), `runs.json` index (`runs.mjs`), live run progress (`progress.mjs`), durable per-ticket ledger (`ledger.mjs`), `--summary` matrix (`summary.mjs`), self-contained HTML dashboard (`dashboard.mjs`). |
+| `run.mjs` | Main CLI entry point (`--worktree`, `--url`, `--target`, `--persona`, `--source`, `--plan`, `--check`, `--serve`, `--summary`, `--only`, `--ac`, `--debug`, `--help`). |
+| `lib/` | Argument parsing and offline preflight (`inputs.mjs`), target profiles and capabilities (`targets.mjs`), data sources and qualification (`sources.mjs`), input snapshot/digest (`snapshot.mjs`), origin validation (`origins.mjs`), evidence/report rendering (`evidence.mjs`), `runs.json` index (`runs.mjs`), live run progress (`progress.mjs`), durable per-ticket ledger (`ledger.mjs`), `--summary` matrix (`summary.mjs`), `--help` text (`help.mjs`), self-contained HTML dashboard (`dashboard.mjs`). |
 | `runtime/` | Built-in local process runtime (`command.mjs`) — see [`runtime/README.md`](runtime/README.md). |
 | `bdd/` | Gherkin + Playwright browser adapter (`run.mjs`, `fixtures.mjs`, `loopback.mjs`, `reporter.mjs`) — see [`bdd/README.md`](bdd/README.md). |
 | `api/` | Declarative Bruno HTTP adapter (`run.mjs`) — see [`api/README.md`](api/README.md). |

@@ -40,7 +40,8 @@ in the README). Never put credentials or customer data in a manifest, check or f
 
 ## Step 3: run it
 
-From the directory your paths are relative to (or pass `--workspace <path>`):
+From the directory your paths are relative to (or pass `--workspace <path>`). `node proofs/run.mjs --help` lists the
+flags, examples, and every ticket folder with the `--worktree <app>=<dir>` names its manifest expects.
 
 1. **Plan:** `node proofs/run.mjs <ID> <target> --plan` starts nothing, fails early on a bad manifest and lists every
    `Problem:` and `Warning:` at once (logins, required profile fields, source qualification, dirty checkouts, links).

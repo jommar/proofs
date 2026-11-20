@@ -9,6 +9,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { writeDashboard } from './lib/dashboard.mjs';
 import { formatPlan, makeReport, readEvidence } from './lib/evidence.mjs';
+import { helpText, isHelp } from './lib/help.mjs';
 import { isAncestor, record, resolveInputs } from './lib/inputs.mjs';
 import { appendLedger, ledgerEntry, readLedger } from './lib/ledger.mjs';
 import { summarize } from './lib/summary.mjs';
@@ -501,6 +502,7 @@ async function runPhases(input, snapshot, id, scratch, options) {
 const siblingNote = siblings => `Note: sibling proof folder(s) for the same ticket: ${siblings.join(', ')}. Run each ID separately.`;
 
 export async function run(args, deps = {}) {
+  if (isHelp(args)) return { exitCode: 0, help: await helpText(args, deps.workspace ?? process.cwd()) };
   const input = await resolveInputs(args, deps.workspace ?? process.cwd(), deps.parentEnv ?? process.env);
   const result = await runInputs(input, args, deps);
   return input.siblings.length ? { ...result, note: siblingNote(input.siblings) } : result;
@@ -625,8 +627,8 @@ async function main() {
   try {
     const result = await run(process.argv.slice(2), { signal: controller.signal });
     if (result.note) console.error(result.note);
-    if (result.summary !== undefined) {
-      console.log(result.summary);
+    if (result.help !== undefined || result.summary !== undefined) {
+      console.log(result.help ?? result.summary);
       process.exitCode = result.exitCode;
       return;
     }
