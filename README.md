@@ -165,7 +165,7 @@ Every complete run is also appended to `.proofs/<ID>/ledger.json`, beside the ti
 
 - Only complete runs count; `--ac` and `--debug` runs are left out.
 - Per target it takes the latest run per persona and, per AC, the latest of those where the AC applied.
-- Two local runs on different commits become **Before** and **After** (with a Verdict column) when Git shows one commit is an ancestor of the other.
+- Two local runs on different commits become **Before** and **After** (with a Verdict column) when Git shows one commit is an ancestor of the other. They are the latest runs of each commit set in the whole ledger, so they may come from different sessions: each column line names its runs by date and short run id (`run 2026-11-20 0ac19f01`), and a line says so when the Before and After runs were started on different UTC dates.
 - Each profile without a complete run gets a `Not verified on <target>.` line, and a different proof inputs digest across runs is flagged.
 
 ## Write a ticket's proofs

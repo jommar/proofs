@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { parseReportMarkdown } from '../lib/dashboard.mjs';
 import { recordRun } from '../lib/runs.mjs';
+import { summarize } from '../lib/summary.mjs';
 import { run } from '../run.mjs';
 
 const ticket = 'ACME-7';
@@ -376,6 +377,11 @@ test('--summary merges the durable ledger into an AC x target matrix with Before
   assert.match(summary, /\| AC2 — Writes data \| Blocked \| Pass \| N\/A \| Not comparable \|/);
   assert.match(summary, /\| AC4 — Driver claim \| N\/A \| Pass \| N\/A \| Not comparable \|/);
   assert.match(summary, new RegExp(`local before: app@${base.slice(0, 7)}`));
+  // Each column names its runs by date and short id; the base side is the one complete run on the base commit.
+  const [baseRun] = ledger.runs.filter(entry => entry.worktrees?.[0].sha === base && !entry.partial && !entry.debug);
+  assert.match(summary, new RegExp(`- local before: .*; run ${baseRun.startedAt.slice(0, 10)} ${baseRun.id.slice(0, 8)}$`, 'm'));
+  assert.match(summary, /- local after: .*; personas driver, admin; runs \d{4}-\d\d-\d\d [0-9a-f]{8}, \d{4}-\d\d-\d\d [0-9a-f]{8}$/m);
+  assert.doesNotMatch(summary, /different UTC dates/, 'runs made together get no session note');
   assert.match(summary, /- Not verified on uat\./);
   assert.match(summary, /Ticket comment \(markdown\):\n\n\*\*Acceptance-criteria proofs — ACME-7\*\*/);
   assert.doesNotMatch(summary, /Warning: Proof inputs digest differs/);
@@ -385,4 +391,25 @@ test('--summary merges the durable ledger into an AC x target matrix with Before
   await run([ticket, '--target', 'dev', '--context', 'tenant=demo'], { workspace: root, parentEnv: env, invoke: status({}) });
   assert.match((await run([ticket, '--summary'], { workspace: root, parentEnv: env })).summary, /Warning: Proof inputs digest differs/);
   await assert.rejects(run([ticket, '--summary', '--target', 'dev'], { workspace: root, parentEnv: env }), /takes only --workspace/);
+});
+
+test('--summary notes when Before and After runs were started on different UTC dates, without changing the choice', () => {
+  const entry = (id, sha, startedAt, status) => ({
+    id, startedAt, mode: 'worktree', target: 'local', persona: null, digest: 'd',
+    worktrees: [{ app: 'app', sha, repo: 'app' }], results: { AC1: status },
+  });
+  const isAncestor = (repo, a, b) => a === 'aaaaaaa1' && b === 'bbbbbbb2';
+  const summary = entries => summarize({ ticket, acs: [{ id: 'AC1', claim: 'Claim' }], entries, isAncestor });
+  const sameDay = summary([entry('11111111-x', 'aaaaaaa1', '2026-11-20T01:00:00.000Z', 'fail'), entry('22222222-x', 'bbbbbbb2', '2026-11-20T23:00:00.000Z', 'pass')]);
+  assert.match(sameDay.text, /- local before: app@aaaaaaa; persona default; run 2026-11-20 11111111$/m);
+  assert.match(sameDay.text, /- local after: app@bbbbbbb; persona default; run 2026-11-20 22222222$/m);
+  assert.doesNotMatch(sameDay.text, /different UTC dates/);
+  // An older base run paired with today's feature run: the same runs are chosen, and the gap is stated once.
+  const apart = summary([
+    entry('33333333-x', 'aaaaaaa1', '2026-11-19T23:30:00.000Z', 'fail'),
+    entry('44444444-x', 'bbbbbbb2', '2026-11-20T00:30:00.000Z', 'pass'),
+  ]);
+  assert.match(apart.text, /\| AC1 — Claim \| Fail \| Pass \| Delivered \|/);
+  assert.match(apart.comment, /^- Before and after runs were started on different UTC dates \(2026-11-19, 2026-11-20; up to 1\.0 hours apart\), so they may come from different sessions\.$/m);
+  assert.equal(apart.text.match(/different UTC dates/g).length, 2, 'once in the console notes and once in the comment');
 });

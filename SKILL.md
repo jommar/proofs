@@ -116,7 +116,9 @@ Report each AC as **Pass**, **Fail**, **Blocked** (a fixture, login or response 
 **Skipped** (filtered out by `--ac`), **Not applicable here** (the target lacks a capability, denies writes, or the run
 used another persona), or **Uncovered** (no check). Across targets, run `node proofs/run.mjs <ID> --summary`: it reads
 the ticket's durable `ledger.json` and prints the AC x target matrix (Before/After for base and feature) and a
-ticket comment with `Not verified on <target>` lines. Paste that, do not rebuild it by hand. State which ACs have no checks; never call a ticket
+ticket comment with `Not verified on <target>` lines. Paste that, do not rebuild it by hand. It merges every recorded
+run, not just this session's: check the run dates and short ids on each column line (and any `different UTC dates`
+line) against the runs you made. State which ACs have no checks; never call a ticket
 proven on partial coverage. A report is evidence only for the run that produced it (including its `Duration:` phase
 breakdown). For a base-versus-feature comparison, use the table in the previous section.
 
