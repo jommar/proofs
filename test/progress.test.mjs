@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { collectDashboardData, renderDashboardHtml, writeDashboard } from '../lib/dashboard.mjs';
+import { resultLines } from '../lib/evidence.mjs';
 import { startProgress } from '../lib/progress.mjs';
 import { PROGRESS_STALE_MS, recordRun } from '../lib/runs.mjs';
 import { run } from '../run.mjs';
@@ -117,6 +118,52 @@ test('a progress write that fails only warns: the run, its exit code, report and
   const tracker = await startProgress(join(out(root), 'missing'), ticket, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', phase => ({ phase }));
   await tracker.phase('bdd');
   assert.equal(await tracker.stop(), 'Live progress in .proofs-out/runs.json could not be updated.');
+});
+
+test('a real run prints its id and pid, each phase once, then one result word per AC; plan, check and summary print none', async t => {
+  const { root, args } = await workspace(t);
+  const claims = ['Synthetic claim one', 'Synthetic claim two', 'Synthetic claim three'];
+  await writeFile(join(root, '.proofs', ticket, 'manifest.json'), JSON.stringify({ acs: claims.map((claim, n) => ({ id: `AC${n + 1}`, claim })) }));
+  const lines = [];
+  const deps = {
+    workspace: root, parentEnv: { PATH: process.env.PATH }, announce: line => lines.push(line),
+    startSandbox: async () => ({ env: { PROOF_APP_URL: 'http://localhost:3333' }, close: async () => {} }),
+    invoke: async ({ name, env }) => {
+      const rows = name === 'bdd' ? [{ ac: 'AC1', status: 'pass', observed: 'secret-looking evidence' }] : [{ ac: 'AC2', status: 'fail', observed: 'secret-looking evidence' }];
+      await writeFile(env.PROOF_RESULTS, rows.map(row => `${JSON.stringify(row)}\n`).join(''));
+      return name === 'bdd' ? 0 : 1;
+    },
+  };
+  const outcome = await run(args, deps);
+  assert.equal(outcome.exitCode, 1);
+  const id = outcome.reportPath.split('/').at(-2);
+  assert.deepEqual(lines, [
+    `Run ${id} started (pid ${process.pid})`,
+    'Phase: setup', 'Phase: startup', 'Phase: bdd', 'Phase: api', 'Phase: teardown',
+    'AC1 Pass', 'AC2 Fail', 'AC3 Uncovered',
+  ]);
+  // The end lines say what the report's Result column says.
+  const report = await readFile(outcome.reportPath, 'utf8');
+  assert.match(report, /^\| AC1 — .* \| Pass — /m);
+  assert.match(report, /^\| AC2 — .* \| Fail — /m);
+  assert.match(report, /^\| AC3 — .* \| Blocked — Uncovered/m);
+  const printed = lines.join('\n');
+  for (const text of [...claims, 'secret-looking evidence', root, 'localhost']) assert.ok(!printed.includes(text), text);
+
+  // --ac marks the others Skipped; a throwing console never fails or changes the run.
+  const filtered = await run([...args, '--ac', 'AC1'], { ...deps, announce: () => { throw new Error('stderr closed'); } });
+  assert.equal(filtered.exitCode, 0);
+  assert.match(await readFile(filtered.reportPath, 'utf8'), /^\| AC2 — .* \| Skipped/m);
+  lines.length = 0;
+  await run([...args, '--ac', 'AC1'], deps);
+  assert.deepEqual(lines.slice(-3), ['AC1 Pass', 'AC2 Skipped', 'AC3 Skipped']);
+  assert.deepEqual(resultLines([{ id: 'B' }, { id: 'N' }], { B: 'blocked', N: 'na' }), ['B Blocked', 'N Not applicable here']);
+
+  lines.length = 0;
+  assert.equal((await run([...args, '--plan'], deps)).exitCode, 0);
+  assert.equal((await run([...args, '--check'], deps)).exitCode, 0);
+  assert.ok((await run([ticket, '--summary'], deps)).summary);
+  assert.deepEqual(lines, []);
 });
 
 test('a running entry whose runner died or whose heartbeat stopped shows as interrupted, and only live runs refresh the page', async t => {

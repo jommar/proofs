@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { writeDashboard } from './lib/dashboard.mjs';
-import { formatPlan, makeReport, readEvidence } from './lib/evidence.mjs';
+import { formatPlan, makeReport, readEvidence, resultLines } from './lib/evidence.mjs';
 import { helpText, isHelp } from './lib/help.mjs';
 import { isAncestor, record, resolveInputs } from './lib/inputs.mjs';
 import { appendLedger, ledgerEntry, readLedger } from './lib/ledger.mjs';
@@ -499,7 +499,11 @@ async function runPhases(input, snapshot, id, scratch, options) {
   return phases;
 }
 
-const siblingNote = siblings => `Note: sibling proof folder(s) for the same ticket: ${siblings.join(', ')}. Run each ID separately.`;
+// Console lines for whoever watches a real run: the run id, pid, phase names, AC ids and result words only, never
+// claims, evidence or paths. A failed write never fails or changes the run.
+const announcer = announce => line => { try { announce(line); } catch { /* best effort, like progress */ } };
+
+const siblingNote = siblings =>`Note: sibling proof folder(s) for the same ticket: ${siblings.join(', ')}. Run each ID separately.`;
 
 export async function run(args, deps = {}) {
   if (isHelp(args)) return { exitCode: 0, help: await helpText(args, deps.workspace ?? process.cwd()) };
@@ -511,6 +515,7 @@ export async function run(args, deps = {}) {
 async function runInputs(input, args, {
   parentEnv = process.env, signal = new AbortController().signal,
   captureDataset, startSandbox, invoke = invokeChild, adapterTimeoutMs = ADAPTER_TIMEOUT_MS, onReady, cleanup = cleanupScratch,
+  announce = () => {},
 } = {}) {
   if (input.summary) {
     const entries = await readLedger(input.ticketDir);
@@ -556,8 +561,11 @@ async function runInputs(input, args, {
     return { ...served, ...(diagnosticsDir ? { diagnosticsDir } : {}) };
   }
 
-  // Live progress for the dashboard; a --check run is not indexed, so it shows none.
-  const progress = input.check ? undefined : await startProgress(out, input.ticket, id, phase => describeProgress(input, args, { startedAt, phase }));
+  // Live progress for the dashboard and the console; a --check run is not indexed, so it shows none.
+  const say = announcer(announce);
+  if (!input.check) say(`Run ${id} started (pid ${process.pid})`);
+  const progress = input.check ? undefined : await startProgress(out, input.ticket, id,
+    phase => describeProgress(input, args, { startedAt, phase }), phase => say(`Phase: ${phase}`));
   const phases = await runPhases(input, snapshot, id, scratch, { parentEnv, signal, captureDataset, startSandbox, invoke, adapterTimeoutMs, onPhase: progress?.phase });
   const progressWarning = await progress?.stop();
   const durationMs = Date.now() - startedMs;
@@ -592,6 +600,7 @@ async function runInputs(input, args, {
   }
   const reportPath = join(runDir, 'report.md');
   await writeFile(reportPath, report, { flag: 'wx', mode: 0o600 });
+  for (const line of resultLines(input.acs, statuses)) say(line);
   // The report is the deliverable: a failed index write is reported beside it, never as a failed run.
   const runsWarning = await recordRun(out, input.ticket, id, describeRun(input, args, id, {
     startedAt, exitCode, reportPath, durationMs, timings: phases.run.timings,
@@ -625,7 +634,7 @@ async function main() {
   process.on('SIGINT', cancel);
   process.on('SIGTERM', cancel);
   try {
-    const result = await run(process.argv.slice(2), { signal: controller.signal });
+    const result = await run(process.argv.slice(2), { signal: controller.signal, announce: line => console.error(line) });
     if (result.note) console.error(result.note);
     if (result.help !== undefined || result.summary !== undefined) {
       console.log(result.help ?? result.summary);

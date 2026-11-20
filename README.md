@@ -70,6 +70,8 @@ An adapter folder (`bdd/` or `api/`) that holds no check files is treated as abs
 
 While a run is in progress, `runs.json` holds a `running` entry for it (start time, settings, current phase, the runner's pid and a heartbeat updated every 15 seconds) and `.proofs-out/dashboard.html` is rebuilt at each phase (`setup`, `startup`, then each adapter, `teardown`), so the page shows the run, its phase and elapsed time and reloads itself every 5 seconds while anything is running. The entry becomes the normal record when the run ends. A running entry whose process is gone or whose heartbeat is over a minute old shows as `interrupted`. Progress is phase-level, not per AC, and a failed progress write is only a warning. `--check` and `--serve` show no progress, and the ledger only ever gets finished runs.
 
+The console follows the same phases. A run prints `Run <run-id> started (pid <pid>)` on stderr at once, then `Phase: <name>` as each phase starts, and at the end one `<AC id> <Result>` line per AC (`Pass`, `Fail`, `Blocked`, `Uncovered`, `Skipped` or `Not applicable here`) before the `Report: <path>` line on stdout. These lines hold only ids, the pid, phase names and result words; `--plan`, `--check`, `--summary`, `--help` and `--serve` print none of them.
+
 ## Test a local checkout
 
 `--worktree [app=]<dir>` tests one checkout. The directory must be a Git checkout root; its committed `HEAD` is exported and started with the manifest's `runtimeOptions.services` recipe (see [Built-in runtime](#built-in-runtime)). The report lists each checkout's commit and whether it was clean; uncommitted changes are not tested. Leave the app name off when the manifest has one app; otherwise name each one (`--worktree web=<dir> --worktree api=<dir>`).

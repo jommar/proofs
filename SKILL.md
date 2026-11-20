@@ -50,7 +50,9 @@ flags, examples, and every ticket folder with the `--worktree <app>=<dir>` names
    broken environment from a failing AC. `HTTP 401/403` means reachable but not logged in; the login is not verified.
 3. **Run:** drop the flag, then read `.proofs-out/<ID>/<run-id>/report.md`. While it runs, `.proofs-out/dashboard.html`
    shows it as `running` with its current phase (`setup`, `startup`, `bdd`, `api`, `teardown`) and elapsed time, and
-   reloads itself every few seconds; a run whose process died shows as `interrupted`.
+   reloads itself every few seconds; a run whose process died shows as `interrupted`. On stderr the run prints
+   `Run <run-id> started (pid <pid>)` (the pid tells your run from another agent's on the same ticket), a
+   `Phase: <name>` line per phase, and at the end one `<AC id> <Result>` line per AC before `Report: <path>`.
 
 Targets and flags:
 

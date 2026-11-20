@@ -39,11 +39,14 @@ async function commit(dir, field) {
 
 // Runs the harness; a failing run exits nonzero, which is expected for the base checkout.
 async function proof(...target) {
-  const { stdout } = await promisify(execFile)(process.execPath, [runner, 'ACME-1', '--workspace', workspace, ...target]).catch(error => error);
+  const { stdout, stderr = '' } = await promisify(execFile)(process.execPath, [runner, 'ACME-1', '--workspace', workspace, ...target]).catch(error => error);
+  // The run's console lines (run id, pid, phases, one result per AC) go to stderr; pass them through.
+  process.stderr.write(stderr);
   const reportPath = stdout?.match(/^Report: (.+)$/m)?.[1];
   assert.ok(reportPath, 'The run did not produce a report');
   const report = await readFile(reportPath, 'utf8');
   const results = Object.fromEntries(['AC1', 'AC2'].map(id => [id, report.split('\n').find(line => line.startsWith(`| ${id} — `)).split('|')[2].trim()]));
+  for (const [id, result] of Object.entries(results)) assert.match(stderr, new RegExp(`^${id} ${result.split(' — ')[0]}$`, 'm'), `${id}'s console line matches the report`);
   return { report, results };
 }
 
